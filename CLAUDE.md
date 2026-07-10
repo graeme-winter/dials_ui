@@ -385,15 +385,19 @@ Three more changes after the multi-crystal work:
   source via `_plot_source_text`. Applies to refine and integrate pages
   alike.
 - **Correlation matrix can run after scaling.** New GUI-only `use_scaled`
-  check field on the correlation_matrix step (a pseudo-flag like merge/
-  export's `mode`, intercepted in `_build_command`, never emitted as a real
-  arg). When ticked: inputs become `scaled.expt/.refl` and outputs are
-  redirected to `dials.correlation_matrix.scaled.html` / `.scaled.log` so
-  the post-scaling run doesn't clobber the post-cosym one. `_corrmat_html_text`,
-  `_corrmat_log_name`, `_current_log_text` and `_refresh_log_tab` all read
-  the `.scaled.` files when the toggle is on, and a trace on the toggle
-  refreshes the Log and Plots tabs immediately. `_FalseVar` is a tiny
-  always-False stand-in used as the safe default when looking up the field.
+  check field on the correlation_matrix step (a pseudo-flag, never emitted
+  as a real arg — stripped in `_build_command`). Its trace callback (like
+  the scale "Cluster to scale" selector) fills the Experiment/Reflection
+  input fields with `scaled.expt/.refl` when ticked and reverts them to the
+  `symmetrized.*` defaults when unticked, so the input fields are the single
+  source of truth (`_build_command` just reads them — it no longer overrides
+  inputs itself). When the toggle is on, `_build_command` also redirects
+  outputs to `dials.correlation_matrix.scaled.html` / `.scaled.log` so the
+  post-scaling run doesn't clobber the post-cosym one; `_corrmat_html_text`,
+  `_corrmat_log_name`, `_current_log_text` and `_refresh_log_tab` read the
+  `.scaled.` files when the toggle is on, and the same trace refreshes the
+  Log and Plots tabs immediately. `_FalseVar` is a tiny always-False
+  stand-in used as the safe default when looking up the field.
 - **Load state from the working directory.** `_load_state_from_workdir()`
   infers step completion from files on disk (`_step_outputs_present(step)`:
   a step's declared `.expt`/`.refl` outputs exist, or for

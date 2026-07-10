@@ -1795,12 +1795,23 @@ class DialsGUI(tk.Tk):
             self.scale_cluster_var.trace_add(
                 "write", lambda *_: self._update_command_preview()
             )
-        # For correlation_matrix, toggling 'use scaled data' changes which
-        # HTML/log files the Plots/Log tabs should read, so refresh those too.
+        # For correlation_matrix, toggling 'use scaled data' changes both
+        # the input files and which HTML/log files the Plots/Log tabs read.
         if step.id == "correlation_matrix":
             us = self.field_vars[step.id].get("use_scaled")
             if us is not None:
                 def _on_use_scaled(*_):
+                    # Update the Experiment/Reflection file fields to match:
+                    # scaled.* when ticked, symmetrized.* (the defaults) when
+                    # not. The fields remain editable if the user wants
+                    # something else.
+                    exp_var, refl_var = self.input_vars["correlation_matrix"][:2]
+                    if bool(us.get()):
+                        exp_var.set("scaled.expt")
+                        refl_var.set("scaled.refl")
+                    else:
+                        exp_var.set("symmetrized.expt")
+                        refl_var.set("symmetrized.refl")
                     self._update_command_preview()
                     self._refresh_log_tab(step)
                     if step.plot_kind and HAVE_MPL:
@@ -1912,15 +1923,12 @@ class DialsGUI(tk.Tk):
 
         if step.is_import:
             args.extend(self.image_files)
-        elif cm_use_scaled:
-            # Correlation matrix on scaled data: use scaled.expt/.refl
-            # instead of whatever the input fields say.
-            args.append("scaled.expt")
-            args.append("scaled.refl")
         else:
-            # Normal case (including cluster scaling): the input fields hold
-            # the right files - for cluster scaling the "Cluster to scale"
-            # selector has already filled them with cluster_N.expt/.refl.
+            # The input fields are the single source of truth. For cluster
+            # scaling the "Cluster to scale" selector has filled them with
+            # cluster_N.expt/.refl, and for correlation_matrix the "use
+            # scaled data" toggle has set them to scaled.expt/.refl - so we
+            # just read the fields here.
             for var in self.input_vars[step.id]:
                 v = var.get().strip()
                 if v:
@@ -2498,8 +2506,14 @@ class DialsGUI(tk.Tk):
         # marker shapes too, keeping every line visually distinct.
         import numpy as _np
         try:
-            import matplotlib.cm as _cm
-            cmap = _cm.get_cmap("tab20")
+            import matplotlib as _mpl
+            # matplotlib.colormaps (>=3.5) replaces the deprecated
+            # matplotlib.cm.get_cmap; fall back for very old versions.
+            try:
+                cmap = _mpl.colormaps["tab20"]
+            except (AttributeError, KeyError):
+                import matplotlib.cm as _cm
+                cmap = _cm.get_cmap("tab20")
         except Exception:
             cmap = None
         markers = [".", "o", "s", "^", "v", "D", "x", "+", "*", "<", ">", "p"]
