@@ -46,7 +46,9 @@ Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
    writes `optimised.expt`; you can then point the Index step's
    "Experiment file" field at `optimised.expt` instead of `imported.expt`.
 4. **Index** (`dials.index`) — set `space_group` / `unit_cell` /
-   `max_lattices` if needed.
+   `max_lattices` if needed. For multiple crystals (joint=false), the Plots
+   tab shows a **progress bar** driven by the `Indexing imageset id <id>
+   (k/N)` output so you can see how far through the imagesets it is.
 5. **Bravais Lattice Determination** (optional,
    `dials.refine_bravais_settings`) — prints the table of candidate
    lattices/space groups with RMS deviations; per the tutorial, the
@@ -65,7 +67,12 @@ Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
     (OPTICS). The **output clusters** toggle (`significant_clusters.output=True`)
     is **on by default**, so it writes `cluster_0.expt/.refl`,
     `cluster_1.expt/.refl`, … ready for independent scaling; untick it if
-    you only want the analysis/plots and not the split files.
+    you only want the analysis/plots and not the split files. Normally run
+    after Cosym on `symmetrized.*`, but you can **also run it after Scale**
+    by ticking **use scaled data** — that switches the inputs to
+    `scaled.expt/.refl` and writes to `dials.correlation_matrix.scaled.html`
+    / `.scaled.log` so it doesn't overwrite the earlier post-cosym run (the
+    Plots and Log tabs follow the toggle to the matching files).
 9. **Scale** (`dials.scale`) — tick `anomalous` for anomalous data, set
    `absorption_level` (low/medium/high) if the sample has significant
    absorption, optional `d_min`. For multiple clusters, use the **cluster
@@ -110,7 +117,7 @@ below):
   RMSDs, % indexed, space group, merging statistics, etc).
 * **Full Log** — the raw `dials.<program>.log` DIALS itself wrote, with a
   refresh button.
-* **Plots** — *(Find Spots, Refine, Integrate, Correlation Matrix and Scale)*
+* **Plots** — *(Index, Find Spots, Refine, Integrate, Correlation Matrix and Scale)*
   live-updating matplotlib graphs of the key per-step diagnostics (see
   below).
 
@@ -124,24 +131,30 @@ whenever you re-select an already-run step). It complements the
 it going well?" traces you watch *while* a long step runs, on the same axes
 DIALS prints them in.
 
-For multiple data sets, Find Spots / Refine / Integrate show **one page of
-plots per data set** (with a **Data set** selector on the Plots tab), and
-Scale shows the merging statistics for whichever cluster is selected in the
-Setup tab.
+For multiple data sets, Refine and Integrate show **one page of plots per
+run / data set** (with a selector on the Plots tab), Find Spots draws one
+line per imageset on shared axes, and Scale shows the merging statistics for
+whichever cluster is selected in the Setup tab.
 
+* **Index** — for multiple crystals (joint=false), a **progress bar** driven
+  by the `Indexing imageset id <id> (k/N)` output (the `(k/N)` is a reliable
+  measure of how many imagesets have been started). Single-crystal indexing
+  has no per-imageset progress; use the Summary / Full Log tabs for the
+  result.
 * **Find Spots** — a line graph of the number of strong pixels found per
   image (from the `Found N strong pixels on image M` output), updating as
   the scan is processed. find_spots works through one imageset at a time
   (each introduced by a `Finding strong spots in imageset N` banner), so
-  each imageset is drawn as its **own line on shared axes** — earlier
-  imagesets persist as later ones are added, and the imageset number labels
-  each line in the legend. The X axis is the per-imageset image number
-  (which restarts at 1 for each imageset).
-* **Refine** — for a single crystal, line graphs of RMSD_X, RMSD_Y (mm,
-  left axis) and RMSD_Phi (deg, right axis) versus refinement step, from
-  the "Refinement steps" table, so you can see the refinement converge. For
-  multiple crystals it shows the final RMSD_X/Y/Z per experiment (data set)
-  from the "RMSDs by experiment" table.
+  each imageset is drawn as its **own line on shared axes** (each a distinct
+  colour) — earlier imagesets persist as later ones are added, and the
+  imageset number labels each line in the legend. The X axis is the
+  per-imageset image number (which restarts at 1 for each imageset).
+* **Refine** — line graphs of RMSD_X, RMSD_Y (positional) and RMSD_Phi/Z
+  (angular) **versus refinement step**, i.e. the full convergence of a
+  refinement run, not just its final RMSDs. For multiple crystals
+  (joint=false) refinement runs separately per experiment and prints one
+  "Refinement steps" table each; the Plots tab pages between them ("run
+  1", "run 2", …) so you see every run's convergence.
 * **Integrate** — a live **progress bar** tracking block processing (parsed
   from the block table and the per-block `Frames: A -> B` output; the bar
   correctly reflects that integration passes over the blocks twice, once
@@ -214,7 +227,7 @@ keep working in the main window while they're open.
   table it could find in the log text was removed for plotting too many
   irrelevant things; the current **Plots** tab is the deliberate,
   targeted replacement — it appears only on the four steps where a small
-  fixed set of traces is genuinely useful (Find Spots, Refine, Integrate,
+  fixed set of traces is genuinely useful (Index, Find Spots, Refine, Integrate,
   Scale), parses only the specific outputs described above, and updates
   live. The "Run and show report in web browser" button (the full,
   Plotly-based `dials.report`) remains available on every step for the

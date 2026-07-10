@@ -235,6 +235,7 @@ STEPS: List[StepDef] = [
         ],
         outputs=["indexed.expt", "indexed.refl"],
         log_file="dials.index.log",
+        plot_kind="index",
     ),
     StepDef(
         id="bravais",
@@ -344,21 +345,28 @@ STEPS: List[StepDef] = [
         title="8c. Correlation Matrix (multi-crystal)",
         program="dials.correlation_matrix",
         help=(
-            "For MULTIPLE crystals, after Cosym: measure the pairwise "
-            "similarity of the data sets and cluster the isomorphous ones "
-            "using the OPTICS algorithm, writing dials.correlation_matrix "
-            ".html (with the correlation / cos-angle matrices, dendrograms "
-            "and cluster assignments). Tick 'output clusters' to also write "
+            "For MULTIPLE crystals: measure the pairwise similarity of the "
+            "data sets and cluster the isomorphous ones using the OPTICS "
+            "algorithm, writing dials.correlation_matrix.html (with the "
+            "correlation / cos-angle matrices, dendrograms and cluster "
+            "assignments). Normally run after Cosym on symmetrized data; you "
+            "can ALSO run it after Scale by ticking 'use scaled data' (which "
+            "switches the inputs to scaled.expt/.refl and writes to "
+            "dials.correlation_matrix.scaled.html so it doesn't overwrite the "
+            "earlier run). 'output clusters' (on by default) writes "
             "cluster_0.expt/.refl, cluster_1.expt/.refl, ... which can then "
             "be scaled independently (see Scale). The Plots tab visualises "
-            "the matrices, reachability and cluster coordinates from the "
-            "HTML output."
+            "the matrices, reachability and cluster coordinates from the HTML."
         ),
         inputs=[
             InputSpec("Experiment file", "symmetrized.expt"),
             InputSpec("Reflection file", "symmetrized.refl"),
         ],
         extra_fields=[
+            ExtraField("use_scaled", "use scaled data (run after scaling)",
+                       "check",
+                       help="switch inputs to scaled.expt/.refl and write to "
+                            "dials.correlation_matrix.scaled.html"),
             ExtraField("significant_clusters.output",
                        "output clusters (write cluster_N.expt/.refl)",
                        "check", default="True",
@@ -647,6 +655,61 @@ def parse_refine_steps(text: str) -> Dict[str, List[float]]:
     return {"step": steps, "rmsd_x": rmsd_x, "rmsd_y": rmsd_y, "rmsd_phi": rmsd_phi}
 
 
+def parse_all_refine_steps(text: str) -> List[Dict[str, List[float]]]:
+    """refine (multi-crystal joint=false): every 'Refinement steps' table
+    in the output, in order, one per refinement run/experiment.
+
+    Returns a list of {'step','rmsd_x','rmsd_y','rmsd_phi'} - one entry per
+    table - so the Plots tab can page between per-run convergence curves.
+    For a single-crystal run this is a list of length 1 (or more, if
+    refinement printed several macrocycle tables).
+
+    The RMSD columns may be in mm (single sweep) or px (multi-crystal); we
+    just take columns 2/3/4 after the integer step in column 0, matching
+    parse_refine_steps. Each table is delimited by its own 'Refinement
+    steps' header and terminated by a blank line after its data rows."""
+    lines = text.splitlines()
+    tables: List[Dict[str, List[float]]] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if not _REFINE_HEADER_RE.search(lines[i]):
+            i += 1
+            continue
+        # Collect data rows following this header.
+        tbl = {"step": [], "rmsd_x": [], "rmsd_y": [], "rmsd_phi": []}
+        j = i + 1
+        started = False
+        while j < n:
+            cells = _split_table_row(lines[j])
+            if cells is None:
+                if started and not lines[j].strip():
+                    break
+                j += 1
+                continue
+            if len(cells) < 5:
+                j += 1
+                continue
+            try:
+                step = float(int(cells[0]))
+                x = float(cells[2])
+                y = float(cells[3])
+                phi = float(cells[4])
+            except ValueError:
+                j += 1
+                continue
+            started = True
+            tbl["step"].append(step)
+            tbl["rmsd_x"].append(x)
+            tbl["rmsd_y"].append(y)
+            tbl["rmsd_phi"].append(phi)
+            j += 1
+        if tbl["step"]:
+            tables.append(tbl)
+        i = max(j, i + 1)
+    return tables
+
+
 _FRAMES_RE = re.compile(r"Frames:\s*(\d+)\s*->\s*(\d+)")
 
 
@@ -699,6 +762,28 @@ def parse_integrate_progress(text: str) -> Dict[str, int]:
         "last_from": int(last_from),
         "last_to": int(last_to),
     }
+
+
+# Multi-crystal indexing (joint=false) processes one imageset at a time and
+# prints a line like "Indexing imageset id 19 (20/36)". The (k/N) is a
+# reliable progress measure: k of N imagesets started. We take the last
+# such line seen.
+_INDEX_PROGRESS_RE = re.compile(
+    r"Indexing\s+imageset\s+id\s+(\d+)\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)",
+    re.IGNORECASE,
+)
+
+
+def parse_index_progress(text: str) -> Optional[Dict[str, int]]:
+    """index (multi): parse 'Indexing imageset id <id> (k/N)' progress
+    lines. Returns {'imageset_id': id, 'done': k, 'total': N} for the most
+    recent line, or None if no such line has appeared (single-crystal
+    indexing, or not started yet)."""
+    matches = _INDEX_PROGRESS_RE.findall(text)
+    if not matches:
+        return None
+    iset, done, total = matches[-1]
+    return {"imageset_id": int(iset), "done": int(done), "total": int(total)}
 
 
 _SUMMARY_VS_IMAGE_RE = re.compile(r"Summary vs image number", re.IGNORECASE)
@@ -1146,6 +1231,14 @@ def corrmat_xy(blob: dict) -> Optional[Dict[str, object]]:
     }
 
 
+class _FalseVar:
+    """Stand-in for a Tk variable that always reports False / empty - used
+    as a safe default when a named field may not exist yet."""
+
+    def get(self):
+        return False
+
+
 class ProcessRunner:
     """Runs a command in a background thread, streaming stdout lines to a
     queue so the Tk main loop can poll it without blocking."""
@@ -1232,8 +1325,8 @@ class DialsGUI(tk.Tk):
         self.plot_canvas = None          # FigureCanvasTkAgg or None
         self.plot_figure = None          # matplotlib Figure or None
         self.plot_status_var: Optional[tk.StringVar] = None
-        self.integrate_progress: Optional[ttk.Progressbar] = None
-        self.integrate_progress_var: Optional[tk.StringVar] = None
+        self.progress_bar: Optional[ttk.Progressbar] = None
+        self.progress_var: Optional[tk.StringVar] = None
         self.plot_page_var: Optional[tk.StringVar] = None
         self.plot_page_combo = None
         self.scale_cluster_var: Optional[tk.StringVar] = None
@@ -1354,8 +1447,8 @@ class DialsGUI(tk.Tk):
         self.plot_canvas = None
         self.plot_figure = None
         self.plot_status_var = None
-        self.integrate_progress = None
-        self.integrate_progress_var = None
+        self.progress_bar = None
+        self.progress_var = None
         self.plot_page_var = None
         self.plot_page_combo = None
         if step.plot_kind and HAVE_MPL:
@@ -1522,6 +1615,19 @@ class DialsGUI(tk.Tk):
             self.scale_cluster_var.trace_add(
                 "write", lambda *_: self._update_command_preview()
             )
+        # For correlation_matrix, toggling 'use scaled data' changes which
+        # HTML/log files the Plots/Log tabs should read, so refresh those too.
+        if step.id == "correlation_matrix":
+            us = self.field_vars[step.id].get("use_scaled")
+            if us is not None:
+                def _on_use_scaled(*_):
+                    self._update_command_preview()
+                    self._refresh_log_tab(step)
+                    if step.plot_kind and HAVE_MPL:
+                        self._refresh_plots_from_text(
+                            step, self._plot_source_text(step)
+                        )
+                us.trace_add("write", _on_use_scaled)
 
         btn_row = ttk.Frame(parent)
         btn_row.pack(anchor="w", pady=12)
@@ -1617,6 +1723,12 @@ class DialsGUI(tk.Tk):
         args: List[str] = []
 
         cluster = self._selected_cluster()
+        # correlation_matrix "use scaled data" pseudo-toggle
+        cm_use_scaled = (
+            step.id == "correlation_matrix"
+            and bool(self.field_vars.get(step.id, {}).get("use_scaled",
+                                                           _FalseVar()).get())
+        )
 
         if step.is_import:
             args.extend(self.image_files)
@@ -1625,6 +1737,11 @@ class DialsGUI(tk.Tk):
             # of the input fields, so each cluster is scaled independently.
             args.append(f"cluster_{cluster}.expt")
             args.append(f"cluster_{cluster}.refl")
+        elif cm_use_scaled:
+            # Correlation matrix on scaled data: use scaled.expt/.refl
+            # instead of whatever the input fields say.
+            args.append("scaled.expt")
+            args.append("scaled.refl")
         else:
             for var in self.input_vars[step.id]:
                 v = var.get().strip()
@@ -1663,6 +1780,17 @@ class DialsGUI(tk.Tk):
                 f"output.html=dials.scale.cluster_{cluster}.html",
                 f"output.log=dials.scale.cluster_{cluster}.log",
             ])
+
+        # correlation_matrix on scaled data: drop the GUI-only 'use_scaled'
+        # pseudo-flag and redirect the HTML/log to '.scaled.' names so this
+        # run doesn't overwrite the earlier (post-cosym) correlation matrix.
+        if step.id == "correlation_matrix":
+            args = [a for a in args if not a.startswith("use_scaled=")]
+            if cm_use_scaled:
+                args.extend([
+                    "output.html=dials.correlation_matrix.scaled.html",
+                    "output.log=dials.correlation_matrix.scaled.log",
+                ])
 
         return [program] + args
 
@@ -1820,9 +1948,19 @@ class DialsGUI(tk.Tk):
         return "dials.scale.log"
 
     def _corrmat_html_text(self) -> str:
-        """Read dials.correlation_matrix.html from the working directory
-        (the source for the correlation_matrix Plots tab). '' if absent."""
-        path = os.path.join(self.workdir.get(), "dials.correlation_matrix.html")
+        """Read the correlation-matrix HTML from the working directory (the
+        source for the correlation_matrix Plots tab). If 'use scaled data'
+        is ticked, read the '.scaled.' variant this GUI writes for post-
+        scaling runs; otherwise the default. '' if absent."""
+        use_scaled = bool(
+            self.field_vars.get("correlation_matrix", {})
+            .get("use_scaled", _FalseVar()).get()
+        )
+        name = (
+            "dials.correlation_matrix.scaled.html" if use_scaled
+            else "dials.correlation_matrix.html"
+        )
+        path = os.path.join(self.workdir.get(), name)
         if not os.path.exists(path):
             return ""
         try:
@@ -1839,6 +1977,16 @@ class DialsGUI(tk.Tk):
             return self._corrmat_html_text()
         return self._current_log_text(step)
 
+    def _corrmat_log_name(self) -> str:
+        """The log filename dials.correlation_matrix writes given the
+        current 'use scaled data' selection."""
+        use_scaled = bool(
+            self.field_vars.get("correlation_matrix", {})
+            .get("use_scaled", _FalseVar()).get()
+        )
+        return ("dials.correlation_matrix.scaled.log" if use_scaled
+                else "dials.correlation_matrix.log")
+
     def _current_log_text(self, step: StepDef) -> str:
         """Read back the on-disk log for this step (respecting the dynamic
         merge/export log-name choice and cluster scaling). Returns '' if
@@ -1850,6 +1998,8 @@ class DialsGUI(tk.Tk):
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
         elif step.id == "scale":
             log_name = self._scale_log_name()
+        elif step.id == "correlation_matrix":
+            log_name = self._corrmat_log_name()
         if not log_name:
             return ""
         path = os.path.join(self.workdir.get(), log_name)
@@ -1869,6 +2019,8 @@ class DialsGUI(tk.Tk):
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
         elif step.id == "scale":
             log_name = self._scale_log_name()
+        elif step.id == "correlation_matrix":
+            log_name = self._corrmat_log_name()
 
         text = ""
         if log_name:
@@ -1939,18 +2091,20 @@ class DialsGUI(tk.Tk):
                 ),
             )
 
-        # Integration gets a live progress bar for block processing.
-        if step.plot_kind == "integrate":
+        # Integration and multi-crystal indexing get a live progress bar.
+        if step.plot_kind in ("integrate", "index"):
             prog_frame = ttk.Frame(parent)
             prog_frame.pack(fill="x", pady=(6, 2))
-            self.integrate_progress_var = tk.StringVar(value="Blocks: waiting...")
+            initial = ("Blocks: waiting..." if step.plot_kind == "integrate"
+                       else "Indexing: waiting...")
+            self.progress_var = tk.StringVar(value=initial)
             ttk.Label(
-                prog_frame, textvariable=self.integrate_progress_var, width=40
+                prog_frame, textvariable=self.progress_var, width=40
             ).pack(side="left")
-            self.integrate_progress = ttk.Progressbar(
+            self.progress_bar = ttk.Progressbar(
                 prog_frame, orient="horizontal", mode="determinate", length=400
             )
-            self.integrate_progress.pack(side="left", fill="x", expand=True, padx=6)
+            self.progress_bar.pack(side="left", fill="x", expand=True, padx=6)
 
         self.plot_figure = Figure(figsize=(7.5, 5.0), dpi=100)
         self.plot_canvas = FigureCanvasTkAgg(self.plot_figure, master=parent)
@@ -1992,6 +2146,8 @@ class DialsGUI(tk.Tk):
         try:
             if kind == "find_spots":
                 self._plot_find_spots(text)
+            elif kind == "index":
+                self._plot_index(text)
             elif kind == "refine":
                 self._plot_refine(text)
             elif kind == "integrate":
@@ -2009,6 +2165,55 @@ class DialsGUI(tk.Tk):
     def _set_plot_status(self, msg: str):
         if self.plot_status_var is not None:
             self.plot_status_var.set(msg)
+
+    def _plot_index(self, text: str):
+        """Index step: for multi-crystal indexing (joint=false) DIALS prints
+        'Indexing imageset id <id> (k/N)' as it works through the imagesets.
+        Drive a progress bar from the (k/N) count (reliable). There's no
+        per-image line graph for indexing, so the figure just carries a
+        short explanatory note; the progress bar is the real content."""
+        prog = parse_index_progress(text)
+
+        if self.progress_bar is not None and self.progress_var is not None:
+            if prog is not None and prog["total"] > 0:
+                self.progress_bar.config(maximum=prog["total"], value=prog["done"])
+                self.progress_var.set(
+                    f"Indexing imageset {prog['imageset_id']} "
+                    f"({prog['done']}/{prog['total']})"
+                )
+            else:
+                self.progress_bar.config(value=0)
+                self.progress_var.set(
+                    "Indexing: waiting... (per-imageset progress appears for "
+                    "multi-crystal joint=false runs)"
+                )
+
+        fig = self.plot_figure
+        fig.clear()
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        if prog is not None and prog["total"] > 0:
+            frac = prog["done"] / prog["total"]
+            msg = (
+                f"Indexing multiple crystals\n\n"
+                f"{prog['done']} / {prog['total']} imagesets started "
+                f"({frac*100:.0f}%)\n\n"
+                f"most recent: imageset id {prog['imageset_id']}"
+            )
+            self._set_plot_status(
+                f"indexing {prog['done']}/{prog['total']} imagesets"
+            )
+        else:
+            msg = (
+                "Indexing.\n\nFor multiple crystals (joint=false), a progress "
+                "bar tracks the\n'Indexing imageset id <id> (k/N)' output "
+                "above.\n\nFor a single crystal there is no per-imageset "
+                "progress;\ncheck the Summary / Full Log tabs for the result."
+            )
+            self._set_plot_status("(no multi-crystal indexing progress yet)")
+        ax.text(0.5, 0.5, msg, ha="center", va="center", fontsize=11,
+                transform=ax.transAxes)
+        fig.tight_layout()
 
     def _plot_find_spots(self, text: str):
         series = parse_find_spots_by_imageset(text)
@@ -2078,66 +2283,65 @@ class DialsGUI(tk.Tk):
         fig = self.plot_figure
         fig.clear()
 
-        # Multi-crystal refine writes an "RMSDs by experiment" table (one
-        # row per data set). If present, show per-experiment final RMSDs;
-        # the page selector lets you view all experiments together or the
-        # per-step convergence (which multi refine doesn't tabulate per
-        # experiment, so "all" is the meaningful view here).
-        by_exp = parse_refine_by_experiment(text)
-        if by_exp["exp"]:
+        # Parse every "Refinement steps" table. Single-crystal refine emits
+        # one (or a few macrocycle) table(s); multi-crystal joint=false
+        # refine emits one per experiment/run. We show the RMSD-vs-step
+        # CONVERGENCE for each run (not just the final RMSDs), and the page
+        # selector picks which run. This is the fix for "only shows final
+        # RMSD per experiment": each run's full convergence is available.
+        tables = parse_all_refine_steps(text)
+
+        if not tables:
             self._update_plot_pages(["all"])
-            exps = by_exp["exp"]
-            ax1 = fig.add_subplot(211)
-            ax1.plot(exps, by_exp["rmsd_x"], marker="o", label="RMSD_X (px)")
-            ax1.plot(exps, by_exp["rmsd_y"], marker="s", label="RMSD_Y (px)")
-            ax1.set_ylabel("Positional RMSD (px)", fontsize=8)
-            ax1.set_title("Final RMSDs by experiment (multi-crystal)", fontsize=9)
-            ax1.legend(fontsize=7)
-            ax1.grid(True, alpha=0.3)
-
-            ax2 = fig.add_subplot(212)
-            ax2.plot(exps, by_exp["rmsd_z"], marker="^", color="tab:green",
-                     label="RMSD_Z (images)")
-            ax2.set_xlabel("Experiment (data set) id", fontsize=8)
-            ax2.set_ylabel("RMSD_Z (images)", fontsize=8)
-            ax2.legend(fontsize=7)
-            ax2.grid(True, alpha=0.3)
-            self._set_plot_status(
-                f"{len(exps)} experiments (data sets) refined"
-            )
-            fig.tight_layout()
-            return
-
-        # Single-crystal: the "Refinement steps" convergence table.
-        self._update_plot_pages(["all"])
-        data = parse_refine_steps(text)
-        ax = fig.add_subplot(111)
-        if not data["step"]:
+            ax = fig.add_subplot(111)
             self._set_plot_status("(waiting for the 'Refinement steps' table...)")
             ax.set_title("Refinement RMSDs vs step")
             ax.set_xlabel("Refinement step")
             fig.tight_layout()
             return
+
+        # One page per run. Label pages "run 1".."run N" (1-based). With a
+        # single table this is just ["run 1"] and behaves like before.
+        page_labels = [f"run {k + 1}" for k in range(len(tables))]
+        self._update_plot_pages(page_labels)
+        page = self._current_plot_page()
+        # Map the selected page label back to a table index.
+        sel = 0
+        if page in page_labels:
+            sel = page_labels.index(page)
+        data = tables[sel]
+
         steps = data["step"]
-        # RMSD_X and RMSD_Y are in mm; RMSD_Phi is in degrees. Put the two
-        # positional RMSDs on the left axis and the angular one on a
-        # secondary right-hand axis so all three are readable together.
-        ax.plot(steps, data["rmsd_x"], marker="o", label="RMSD_X (mm)")
-        ax.plot(steps, data["rmsd_y"], marker="s", label="RMSD_Y (mm)")
+        # RMSD_X/Y are a length (mm for a single sweep, px for multi-crystal
+        # refine); RMSD_Phi/Z is angular (deg) or images. Two positional on
+        # the left axis, the third on a secondary right axis.
+        ax = fig.add_subplot(111)
+        ax.plot(steps, data["rmsd_x"], marker="o", label="RMSD_X")
+        ax.plot(steps, data["rmsd_y"], marker="s", label="RMSD_Y")
         ax.set_xlabel("Refinement step")
-        ax.set_ylabel("Positional RMSD (mm)")
+        ax.set_ylabel("Positional RMSD (mm or px)")
         ax.grid(True, alpha=0.3)
 
         ax2 = ax.twinx()
         ax2.plot(steps, data["rmsd_phi"], marker="^", color="tab:green",
-                 label="RMSD_Phi (deg)")
-        ax2.set_ylabel("Angular RMSD (deg)")
+                 label="RMSD_Phi/Z")
+        ax2.set_ylabel("Angular RMSD (deg) / RMSD_Z (images)")
 
         lines1, labels1 = ax.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8)
-        ax.set_title("Refinement RMSDs vs step")
-        self._set_plot_status(f"{len(steps)} refinement steps")
+
+        if len(tables) > 1:
+            ax.set_title(
+                f"Refinement RMSDs vs step - run {sel + 1} of {len(tables)}"
+            )
+            self._set_plot_status(
+                f"run {sel + 1}/{len(tables)}: {len(steps)} refinement steps "
+                f"(use the Data set selector to switch run)"
+            )
+        else:
+            ax.set_title("Refinement RMSDs vs step")
+            self._set_plot_status(f"{len(steps)} refinement steps")
         fig.tight_layout()
 
     def _plot_integrate(self, text: str):
@@ -2145,7 +2349,7 @@ class DialsGUI(tk.Tk):
         progress = parse_integrate_progress(text)
 
         # --- live progress bar (block processing) ---
-        if self.integrate_progress is not None and self.integrate_progress_var is not None:
+        if self.progress_bar is not None and self.progress_var is not None:
             n_blocks = len(blocks)
             if n_blocks:
                 # The block loop runs twice (profile modelling, then
@@ -2154,17 +2358,17 @@ class DialsGUI(tk.Tk):
                 pass_no = 1 if done <= n_blocks else 2
                 in_pass = done if done <= n_blocks else done - n_blocks
                 in_pass = min(in_pass, n_blocks)
-                self.integrate_progress.config(maximum=n_blocks, value=in_pass)
+                self.progress_bar.config(maximum=n_blocks, value=in_pass)
                 label = (
                     f"Pass {pass_no}/2 - block {in_pass}/{n_blocks}"
                     if done else f"Blocks: 0/{n_blocks}"
                 )
                 if progress["last_to"]:
                     label += f"  (frames {progress['last_from']} -> {progress['last_to']})"
-                self.integrate_progress_var.set(label)
+                self.progress_var.set(label)
             else:
-                self.integrate_progress.config(value=0)
-                self.integrate_progress_var.set("Blocks: waiting for block table...")
+                self.progress_bar.config(value=0)
+                self.progress_var.set("Blocks: waiting for block table...")
 
         # --- end-of-integration line graphs (Summary vs image number) ---
         fig = self.plot_figure

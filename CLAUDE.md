@@ -330,7 +330,38 @@ Everything lives in `dials_gui.py`. Rough map:
     left in place since it lets the user report on arbitrary file
     combinations, not just the current step's).
 
-## Known minor rough edge (cosmetic, not yet fixed)
+## Later additions: index progress, refine per-run, corr-matrix after scaling
+
+Three more changes after the multi-crystal work:
+
+- **Index progress bar.** Index gained `plot_kind="index"`. `parse_index_progress`
+  reads `Indexing imageset id <id> (k/N)` (multi-crystal joint=false only)
+  and `_plot_index` drives a progress bar from `(k/N)` — the user confirmed
+  that count is reliable. The old `integrate_progress`/`integrate_progress_var`
+  attributes were renamed to generic `progress_bar`/`progress_var` and the
+  bar is now built for `plot_kind in ("integrate","index")`. There's no
+  per-image line graph for indexing, so the figure just shows a short note;
+  the bar is the content. (The parser function `parse_integrate_progress`
+  keeps its name — only the GUI attributes were renamed.)
+- **Refine shows per-run convergence, not just final RMSDs (bug fix).**
+  Previously `_plot_refine` special-cased the multi "RMSDs by experiment"
+  table and showed only final RMSD per experiment. That threw away the
+  actual refinement progress. Now `parse_all_refine_steps` collects EVERY
+  "Refinement steps" table (joint=false refines each crystal separately and
+  prints one table per run), and `_plot_refine` pages between them ("run
+  1".."run N"), each page the full RMSD-vs-step convergence. Single-crystal
+  is just the len==1 case. `parse_refine_by_experiment` is now unused by the
+  plot but kept as a standalone parser.
+- **Correlation matrix can run after scaling.** New GUI-only `use_scaled`
+  check field on the correlation_matrix step (a pseudo-flag like merge/
+  export's `mode`, intercepted in `_build_command`, never emitted as a real
+  arg). When ticked: inputs become `scaled.expt/.refl` and outputs are
+  redirected to `dials.correlation_matrix.scaled.html` / `.scaled.log` so
+  the post-scaling run doesn't clobber the post-cosym one. `_corrmat_html_text`,
+  `_corrmat_log_name`, `_current_log_text` and `_refresh_log_tab` all read
+  the `.scaled.` files when the toggle is on, and a trace on the toggle
+  refreshes the Log and Plots tabs immediately. `_FalseVar` is a tiny
+  always-False stand-in used as the safe default when looking up the field.
 
 `self.report_button` and `self.report_status_var` are rebound every
 time `select_step()` rebuilds the Setup & Run tab (same pattern the
