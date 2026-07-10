@@ -35,8 +35,12 @@ python3 dials_gui.py
 Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
 
 1. **Import** (`dials.import`) — browse for image/master files, or add a
-   glob pattern (e.g. `../data/ins10_?.nxs` for the multi-sweep insulin
-   example), optionally set `image_range`.
+   glob pattern (e.g. `../data/CIX*gz`, or `../data/ins10_?.nxs` for the
+   multi-sweep insulin example). Glob patterns are passed to `dials.import`
+   **verbatim**, not expanded by the GUI, so a pattern that matches
+   thousands of images stays a single argument on the command line (the
+   listbox shows a rough match count as a hint only). Optionally set
+   `image_range`.
 2. **Find Spots** (`dials.find_spots`).
 3. **Search Beam Position** (optional, `dials.search_beam_position`) —
    writes `optimised.expt`; you can then point the Index step's

@@ -280,7 +280,13 @@ Everything lives in `dials_gui.py`. Rough map:
   - `_build_setup_tab()` / `_build_import_inputs()` — renders the
     editable input/parameter fields, plus the Run/Stop/"Run and show
     report" buttons and a status label (`report_status_var`) for the
-    report button.
+    report button. `_add_glob_pattern` adds the pattern **verbatim** to
+    `self.image_files` (NOT expanded) — `dials.import` does its own
+    expansion, and expanding here would put thousands of paths on the
+    command line for big sweeps; the listbox shows a non-authoritative
+    `glob.glob` count as a hint only, and `image_files` stays the single
+    source of truth (each entry is either a real path from Browse or a
+    verbatim pattern, both passed straight through by `_build_command`).
   - `_build_command()` — assembles the actual argv list for the main
     pipeline command from field values. Confirmed working.
   - `run_step()` / `_poll_runner()` / `_finish_step()` — the main

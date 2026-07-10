@@ -1577,18 +1577,27 @@ class DialsGUI(tk.Tk):
     def _add_glob_pattern(self):
         pattern = simpledialog.askstring(
             "Glob pattern",
-            "Enter a glob pattern (e.g. ../data/ins10_?.nxs):",
+            "Enter a glob pattern (e.g. ../data/CIX*gz or ../data/ins10_?.nxs).\n"
+            "The pattern is passed to dials.import as-is (not expanded here), "
+            "so it's fine for it to match thousands of images:",
             parent=self,
         )
         if not pattern:
             return
-        matches = sorted(glob.glob(pattern))
-        if not matches:
-            messagebox.showwarning("No matches", f"No files matched: {pattern}")
+        pattern = pattern.strip()
+        if not pattern:
             return
-        for m in matches:
-            self.image_files.append(m)
-            self.import_listbox.insert("end", m)
+        # Pass the pattern through verbatim - dials.import does its own shell-
+        # style expansion, and for large sweeps expanding here would put
+        # thousands of paths on the command line (and in the listbox). Just
+        # do a quick, non-authoritative count as a sanity hint to the user.
+        try:
+            n = len(glob.glob(pattern))
+        except Exception:
+            n = None
+        self.image_files.append(pattern)
+        hint = "" if n is None else f"  [matches {n} file(s) now]"
+        self.import_listbox.insert("end", pattern + hint)
         self._update_command_preview()
 
     def _clear_images(self):
