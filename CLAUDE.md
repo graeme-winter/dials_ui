@@ -153,21 +153,33 @@ before touching any of this. What was added:
   `_build_command` no longer overrides the inputs itself (it used to) — the
   selector-driven field fill does that now.
 
-  Separately, the Scale **Plots tab page selector** is the VIEW target:
-  `_plot_scale` builds its page list from `_scale_result_clusters()` (globs
-  `dials.scale.cluster_(\d+)\.log` — clusters with results ON DISK) plus a
-  "plain" page if `dials.scale.log` exists, and reads the selected cluster's
-  log itself via `_read_workdir_file`. `_scale_view_cluster()` reads the
-  page; `_scale_log_name()` prefers the view target (so a completed cluster
-  can be reviewed while another is queued/running), falling back to the run
-  target then plain. The page combo's callback for scale also calls
-  `_refresh_log_tab` so the Full Log follows the viewed cluster. `_finish_step`
-  sets the page to the just-scaled cluster so fresh results show. This is
-  what lets you scale cluster 0, then cluster 1, and still flip back to
-  cluster 0's plots+log. Helpers: `_available_clusters()` (run-target list,
-  globs `cluster_(\d+)\.expt`), `_selected_cluster()` (run target),
-  `_scale_result_clusters()` / `_scale_view_cluster()` (view target),
-  `_read_workdir_file()`.
+  Separately, the Scale **Plots tab page selector** is the VIEW target for
+  the PLOTS: `_plot_scale` builds its page list from
+  `_scale_result_clusters()` (globs `dials.scale.cluster_(\d+)\.log` —
+  clusters with results ON DISK) plus a "plain" page if `dials.scale.log`
+  exists, and reads the selected cluster's log itself via
+  `_read_workdir_file`. `_scale_view_cluster()` reads the page;
+  `_scale_log_name()` (used by plot seeding) prefers the view target,
+  falling back to the run target then plain.
+
+  The **Full Log tab has its OWN independent cluster selector**
+  (`self.log_cluster_var` / `self.log_cluster_combo`, built in
+  `select_step`'s log-tab section for scale), defaulting to
+  "dials.scale.log (default)" and offering each `dials.scale.cluster_N.log`
+  found. `_refresh_log_tab` for scale uses `_scale_log_view_name()` (reads
+  that selector) — NOT `_scale_log_name()` — so the Full Log (and the
+  Summary digest built from the same text) is decoupled from the Plots view
+  and stays on the plain log by default. The Summary tab therefore follows
+  the Full Log selector, not the Plots page. `_finish_step` for a scale
+  cluster run sets the PLOTS page to the just-scaled cluster (fresh results
+  shown) and refreshes the Full Log selector's *choices* to include the new
+  cluster, but leaves the Full Log selection on its default. This lets you
+  scale cluster 0, then cluster 1, and still flip back to cluster 0's plots,
+  while independently viewing any cluster's full log. Helpers:
+  `_available_clusters()` (run-target list, globs `cluster_(\d+)\.expt`),
+  `_selected_cluster()` (run target), `_scale_result_clusters()` /
+  `_scale_view_cluster()` (plots view target), `_scale_log_view_name()`
+  (full-log view target), `_read_workdir_file()`.
 - **Per-data-set / per-cluster plot pagination.** `_build_plots_tab` adds
   a page-selector combobox (`self.plot_page_var` / `plot_page_combo`) for
   find_spots/refine/integrate/scale. `_update_plot_pages(options)` repopulates

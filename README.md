@@ -122,13 +122,17 @@ another's results (equivalent to the tutorial's "make a directory per
 cluster" approach, but kept in one working directory).
 
 Because each cluster's results persist on disk, you can review any
-completed cluster at any time: the Scale **Plots** tab has a **Cluster**
+completed cluster at any time. The Scale **Plots** tab has a **Cluster**
 selector listing every cluster that already has a scale result (plus the
-plain unclustered run if present), and picking one shows that cluster's
-merging-statistics plots and updates the **Full Log** tab to the matching
-`dials.scale.cluster_N.log`. So after scaling cluster 0 and then cluster 1,
-you can still flip back to cluster 0's plots and log. (When a cluster scale
-finishes, its page is selected automatically so you see the fresh results.)
+plain unclustered run if present); picking one shows that cluster's
+merging-statistics plots. The **Full Log** tab has its own separate
+**Log:** selector: it defaults to the plain `dials.scale.log` but can be
+switched to any completed cluster's `dials.scale.cluster_N.log`
+independently of the Plots view. So after scaling cluster 0 and then
+cluster 1, you can still flip back to cluster 0's plots and inspect any
+cluster's full log. (When a cluster scale finishes, its Plots page is
+selected automatically so you see the fresh results, while the Full Log
+stays on its default unless you change it.)
 
 Each step has four tabs (five on the steps that support plots — see
 below):
@@ -140,7 +144,9 @@ below):
 * **Summary** — an automatically extracted digest of the log file (tables,
   RMSDs, % indexed, space group, merging statistics, etc).
 * **Full Log** — the raw `dials.<program>.log` DIALS itself wrote, with a
-  refresh button.
+  refresh button. For the Scale step this tab also has a **Log:** selector
+  to view the plain `dials.scale.log` (default) or any completed cluster's
+  `dials.scale.cluster_N.log`.
 * **Plots** — *(Index, Find Spots, Refine, Integrate, Correlation Matrix and Scale)*
   live-updating matplotlib graphs of the key per-step diagnostics (see
   below).

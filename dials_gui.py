@@ -1386,6 +1386,8 @@ class DialsGUI(tk.Tk):
         self.plot_page_var: Optional[tk.StringVar] = None
         self.plot_page_combo = None
         self.scale_cluster_var: Optional[tk.StringVar] = None
+        self.log_cluster_var: Optional[tk.StringVar] = None
+        self.log_cluster_combo = None
         # Throttle plot redraws while streaming (redrawing on every line is
         # wasteful); only redraw every Nth poll or on completion.
         self._poll_tick = 0
@@ -1637,10 +1639,35 @@ class DialsGUI(tk.Tk):
                 wraplength=760, justify="left",
             ).pack(anchor="w")
 
+        # Full Log tab controls. For the scale step, add a selector to
+        # choose WHICH log to show: the plain dials.scale.log (default) or
+        # any completed cluster's dials.scale.cluster_N.log. This is
+        # independent of the Plots-tab cluster view.
+        self.log_cluster_var = None
+        self.log_cluster_combo = None
+        log_ctrl = ttk.Frame(log_tab)
+        log_ctrl.pack(anchor="w", pady=(4, 0), fill="x")
         ttk.Button(
-            log_tab, text="Refresh from log file",
+            log_ctrl, text="Refresh from log file",
             command=lambda: self._refresh_log_tab(step),
-        ).pack(anchor="w", pady=(4, 0))
+        ).pack(side="left")
+        if step.id == "scale":
+            result_clusters = self._scale_result_clusters()
+            choices = ["dials.scale.log (default)"] + [
+                f"cluster_{c}" for c in result_clusters
+            ]
+            self.log_cluster_var = tk.StringVar(value=choices[0])
+            ttk.Label(log_ctrl, text="   Log:").pack(side="left")
+            log_combo = ttk.Combobox(
+                log_ctrl, textvariable=self.log_cluster_var,
+                values=choices, width=24, state="readonly",
+            )
+            log_combo.pack(side="left")
+            self.log_cluster_combo = log_combo
+            log_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, s=step: self._refresh_log_tab(s),
+            )
 
         self._refresh_log_tab(step)
         # If a log already exists for this step (e.g. re-selecting a step
@@ -2077,13 +2104,24 @@ class DialsGUI(tk.Tk):
         self.stop_button.config(state="disabled")
         self.runner = None
         self.running_step_id = None
-        # If a scale cluster run just finished, point the Plots/Log "view
+        # If a scale cluster run just finished, point the Plots "view
         # cluster" page at it so the results are shown immediately (and the
         # newly-written log is now on disk to build the page list from).
+        # Keep the Full Log tab on its current selection (default plain),
+        # but refresh that selector's choices so the new cluster is now
+        # pickable there too.
         if step.id == "scale" and ok:
             run_cluster = self._selected_cluster()
             if run_cluster is not None and self.plot_page_var is not None:
                 self.plot_page_var.set(f"cluster_{run_cluster}")
+            combo = getattr(self, "log_cluster_combo", None)
+            if combo is not None and self.log_cluster_var is not None:
+                choices = ["dials.scale.log (default)"] + [
+                    f"cluster_{c}" for c in self._scale_result_clusters()
+                ]
+                combo["values"] = choices
+                if self.log_cluster_var.get() not in choices:
+                    self.log_cluster_var.set(choices[0])
         self._refresh_log_tab(step)
         # Definitive plot update from the on-disk log (the streamed
         # stdout and the log file should agree, but the log is canonical;
@@ -2179,6 +2217,17 @@ class DialsGUI(tk.Tk):
                 return f"dials.scale.cluster_{run}.log"
         return "dials.scale.log"
 
+    def _scale_log_view_name(self) -> str:
+        """The scale log filename the FULL LOG tab should show, from its own
+        'Log:' selector (default dials.scale.log). Independent of the Plots
+        tab's cluster view."""
+        var = getattr(self, "log_cluster_var", None)
+        if var is not None:
+            m = re.match(r"cluster_(\d+)$", var.get() or "")
+            if m:
+                return f"dials.scale.cluster_{m.group(1)}.log"
+        return "dials.scale.log"
+
     def _read_workdir_file(self, name: str) -> str:
         """Read a file from the working directory by name. '' if absent."""
         path = os.path.join(self.workdir.get(), name)
@@ -2261,7 +2310,10 @@ class DialsGUI(tk.Tk):
             mode_val = mode.get() if mode else "merge"
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
         elif step.id == "scale":
-            log_name = self._scale_log_name()
+            # The Full Log tab has its own 'Log:' selector (default
+            # dials.scale.log); it is independent of the Plots-tab cluster
+            # view.
+            log_name = self._scale_log_view_name()
         elif step.id == "correlation_matrix":
             log_name = self._corrmat_log_name()
 
