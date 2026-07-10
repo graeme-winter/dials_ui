@@ -56,6 +56,7 @@ Run with:
 from __future__ import annotations
 
 import glob
+import json
 import math
 import os
 import queue
@@ -103,11 +104,15 @@ class ExtraField:
     default: str = ""
     choices: Optional[List[str]] = None
     help: str = ""
+    # For "check" fields: the value emitted when ticked. Defaults to
+    # "True" (so the arg is `key=True`); set to e.g. "false" for a toggle
+    # like joint=false that should emit `joint=false` when ticked.
+    check_value: str = "True"
 
     def build_arg(self, value) -> Optional[str]:
         if self.kind == "check":
             if value:
-                return f"{self.key}=True"
+                return f"{self.key}={self.check_value}"
             return None
         value = (value or "").strip()
         if not value:
@@ -208,13 +213,19 @@ STEPS: List[StepDef] = [
             "indexed.refl. Use the experiment file from Import, or from "
             "Search Beam Position if you ran it. Set space_group / "
             "unit_cell here if known, or after inspecting Bravais lattice "
-            "options below."
+            "options below. For MULTIPLE crystals (many imported sweeps "
+            "that do not share an orientation matrix), tick 'multi-crystal "
+            "(joint=false)' so each sweep is indexed independently in one "
+            "run - see the Cows/Pigs/People workflow."
         ),
         inputs=[
             InputSpec("Experiment file", "imported.expt"),
             InputSpec("Reflection file", "strong.refl"),
         ],
         extra_fields=[
+            ExtraField("joint", "multi-crystal (joint=false)", "check",
+                       check_value="false",
+                       help="index many crystals independently in one run"),
             ExtraField("space_group", "space_group", "entry"),
             ExtraField("unit_cell", "unit_cell", "entry",
                        help="e.g. 78,78,78,90,90,90"),
@@ -290,14 +301,16 @@ STEPS: List[StepDef] = [
     ),
     StepDef(
         id="symmetry",
-        title="8. Symmetry Analysis",
+        title="8. Symmetry (single crystal)",
         program="dials.symmetry",
         help=(
             "Assess spot positions and intensities to identify symmetry "
             "operations present in the data, compose these into a "
             "candidate Laue group / space group, and write "
             "symmetrized.expt / symmetrized.refl. Not needed if the "
-            "correct space group was already set at Index."
+            "correct space group was already set at Index. For MULTIPLE "
+            "crystals use Cosym (below) instead - it determines symmetry "
+            "and resolves indexing ambiguity across all data sets at once."
         ),
         inputs=[
             InputSpec("Experiment file", "integrated.expt"),
@@ -305,6 +318,56 @@ STEPS: List[StepDef] = [
         ],
         outputs=["symmetrized.expt", "symmetrized.refl"],
         log_file="dials.symmetry.log",
+    ),
+    StepDef(
+        id="cosym",
+        title="8b. Cosym (multi-crystal)",
+        program="dials.cosym",
+        help=(
+            "For MULTIPLE crystals: determine the Patterson symmetry AND "
+            "resolve indexing ambiguity across all data sets simultaneously "
+            "(replaces dials.symmetry). Aligns the lattices in reciprocal "
+            "space, estimates the crystal symmetry, and writes "
+            "symmetrized.expt / symmetrized.refl plus dials.cosym.html. Run "
+            "this instead of Symmetry when you indexed with joint=false."
+        ),
+        inputs=[
+            InputSpec("Experiment file", "integrated.expt"),
+            InputSpec("Reflection file", "integrated.refl"),
+        ],
+        outputs=["symmetrized.expt", "symmetrized.refl"],
+        log_file="dials.cosym.log",
+        optional=True,
+    ),
+    StepDef(
+        id="correlation_matrix",
+        title="8c. Correlation Matrix (multi-crystal)",
+        program="dials.correlation_matrix",
+        help=(
+            "For MULTIPLE crystals, after Cosym: measure the pairwise "
+            "similarity of the data sets and cluster the isomorphous ones "
+            "using the OPTICS algorithm, writing dials.correlation_matrix "
+            ".html (with the correlation / cos-angle matrices, dendrograms "
+            "and cluster assignments). Tick 'output clusters' to also write "
+            "cluster_0.expt/.refl, cluster_1.expt/.refl, ... which can then "
+            "be scaled independently (see Scale). The Plots tab visualises "
+            "the matrices, reachability and cluster coordinates from the "
+            "HTML output."
+        ),
+        inputs=[
+            InputSpec("Experiment file", "symmetrized.expt"),
+            InputSpec("Reflection file", "symmetrized.refl"),
+        ],
+        extra_fields=[
+            ExtraField("significant_clusters.output",
+                       "output clusters (write cluster_N.expt/.refl)",
+                       "check",
+                       help="needed to scale clusters separately"),
+        ],
+        outputs=[],
+        log_file="dials.correlation_matrix.log",
+        optional=True,
+        plot_kind="correlation_matrix",
     ),
     StepDef(
         id="scale",
@@ -316,7 +379,11 @@ STEPS: List[StepDef] = [
             "dials.scale.html. Merging statistics and the error model are "
             "printed at the end - this is where you find out about the "
             "final quality of the data. Tick 'anomalous' for anomalous "
-            "data (e.g. SAD/MAD)."
+            "data (e.g. SAD/MAD). For MULTIPLE clusters from the "
+            "Correlation Matrix step, use the cluster selector below to "
+            "scale each cluster_N independently - each run writes its own "
+            "scaled_cluster_N.* / dials.scale.cluster_N.* so nothing is "
+            "overwritten."
         ),
         inputs=[
             InputSpec("Experiment file", "symmetrized.expt"),
@@ -327,6 +394,8 @@ STEPS: List[StepDef] = [
             ExtraField("absorption_level", "absorption_level", "combo",
                        choices=["", "low", "medium", "high"],
                        help="low (~1%, default), medium (~5%), high (~25%)"),
+            ExtraField("d_min", "d_min", "entry",
+                       help="optional resolution cutoff from CC-half fit"),
         ],
         outputs=["scaled.expt", "scaled.refl", "dials.scale.html"],
         log_file="dials.scale.log",
@@ -735,6 +804,285 @@ def parse_scale_merging(text: str) -> Dict[str, object]:
     return result
 
 
+# --------------------------------------------------------------------------
+# Multi-crystal (COWS_PIGS_PEOPLE) live-plot data extraction
+# --------------------------------------------------------------------------
+#
+# When many data sets are imported and indexed with joint=False, find_spots,
+# refine and integrate each produce output covering N data sets. These
+# helpers split that output per data set so the Plots tab can show one page
+# per data set. They reuse the single-data-set parsers above where the
+# per-image / per-step data isn't itself tagged by data set.
+
+
+_IMAGESET_RE = re.compile(r"imageset\s+(\d+)", re.IGNORECASE)
+_SWEEP_COUNT_RE = re.compile(r"sweep:\s*(\d+)", re.IGNORECASE)
+
+
+def parse_find_spots_histograms(text: str) -> Dict[int, int]:
+    """find_spots (multi): the per-imageset histogram headers
+    'NNNN spots found on 100 images' tagged 'for imageset K' -> {imageset:
+    total spots}. Used to detect how many data sets there are and to show
+    a per-data-set spot-total summary. Returns {} if no such headers."""
+    result: Dict[int, int] = {}
+    lines = text.splitlines()
+    current = None
+    for line in lines:
+        m = _IMAGESET_RE.search(line)
+        if m and "histogram" in line.lower():
+            current = int(m.group(1))
+            continue
+        if current is not None:
+            m2 = re.match(r"\s*(\d+)\s+spots found", line)
+            if m2:
+                result[current] = int(m2.group(1))
+                current = None
+    return result
+
+
+_RMSD_BY_EXP_RE = re.compile(r"RMSDs?\s+by\s+experiment", re.IGNORECASE)
+
+
+def parse_refine_by_experiment(text: str) -> Dict[str, List[float]]:
+    """refine (multi): the 'RMSDs by experiment' table ->
+    {exp, nref, rmsd_x, rmsd_y, rmsd_z}. One row per experiment/data set.
+    Columns are (px)/(px)/(images) for multi-crystal refine. Reads rows
+    after the last such header."""
+    lines = text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        if _RMSD_BY_EXP_RE.search(line):
+            header_idx = i
+    keys = ["exp", "nref", "rmsd_x", "rmsd_y", "rmsd_z"]
+    result: Dict[str, List[float]] = {k: [] for k in keys}
+    if header_idx is None:
+        return result
+
+    started = False
+    for line in lines[header_idx + 1:]:
+        cells = _split_table_row(line)
+        if cells is None:
+            if started and not line.strip():
+                break
+            continue
+        if len(cells) < 5:
+            continue
+        try:
+            vals = [
+                float(int(cells[0])),  # exp id
+                float(int(cells[1])),  # nref
+                float(cells[2]),       # rmsd_x
+                float(cells[3]),       # rmsd_y
+                float(cells[4]),       # rmsd_z
+            ]
+        except ValueError:
+            continue
+        started = True
+        for k, v in zip(keys, vals):
+            result[k].append(v)
+
+    return result
+
+
+def integrate_summary_by_dataset(text: str) -> Dict[int, Dict[str, List[float]]]:
+    """integrate (multi): split the 'Summary vs image number' table by its
+    ID column into {dataset_id: {image, n_full, ...}}. Reuses the same
+    column layout as parse_integrate_summary but keys on column 0 (ID)."""
+    lines = text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        if _SUMMARY_VS_IMAGE_RE.search(line):
+            header_idx = i
+    out: Dict[int, Dict[str, List[float]]] = {}
+    if header_idx is None:
+        return out
+
+    started = False
+    for line in lines[header_idx + 1:]:
+        cells = _split_table_row(line)
+        if cells is None:
+            if started and not line.strip():
+                break
+            continue
+        if len(cells) < 13:
+            continue
+        try:
+            ds = int(cells[0])
+            row = [
+                float(int(cells[1])),   # image
+                float(int(cells[2])),   # n_full
+                float(int(cells[3])),   # n_part
+                float(int(cells[4])),   # n_over
+                float(int(cells[5])),   # n_ice
+                float(int(cells[6])),   # n_sum
+                float(int(cells[7])),   # n_prf
+                float(cells[8]),        # ibg
+                float(cells[9]),        # isigi_sum
+                float(cells[10]),       # isigi_prf
+                float(cells[11]),       # cc_prf
+                float(cells[12]),       # rmsd_xy
+            ]
+        except (ValueError, IndexError):
+            continue
+        started = True
+        d = out.setdefault(ds, {k: [] for k in _INTEGRATE_SUMMARY_KEYS})
+        for k, v in zip(_INTEGRATE_SUMMARY_KEYS, row):
+            d[k].append(v)
+
+    return out
+
+
+_CLUSTER_HEAD_RE = re.compile(r"^\s*Cluster\s+(\d+)\s*$")
+_CLUSTER_DATASETS_RE = re.compile(r"Datasets:\s*([0-9,\s]+)")
+_CLUSTER_COMPLETENESS_RE = re.compile(r"Completeness:\s*([0-9.]+)")
+_CLUSTER_MULTIPLICITY_RE = re.compile(r"Multiplicity:\s*([0-9.]+)")
+
+
+def parse_cluster_list(text: str) -> List[Dict[str, object]]:
+    """dials.correlation_matrix (stdout): parse the
+    'Cluster N / Number of datasets / Completeness / Multiplicity /
+    Datasets:...' blocks into a list of
+    {'id': N, 'datasets': [...], 'completeness': f, 'multiplicity': f}.
+    Tolerant of streaming: returns whatever complete-enough blocks exist."""
+    clusters: List[Dict[str, object]] = []
+    lines = text.splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = _CLUSTER_HEAD_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        cid = int(m.group(1))
+        block = {"id": cid, "datasets": [], "completeness": None,
+                 "multiplicity": None}
+        j = i + 1
+        while j < n and not _CLUSTER_HEAD_RE.match(lines[j]):
+            comp = _CLUSTER_COMPLETENESS_RE.search(lines[j])
+            if comp:
+                block["completeness"] = float(comp.group(1))
+            mult = _CLUSTER_MULTIPLICITY_RE.search(lines[j])
+            if mult:
+                block["multiplicity"] = float(mult.group(1))
+            ds = _CLUSTER_DATASETS_RE.search(lines[j])
+            if ds:
+                nums = [int(x) for x in re.findall(r"\d+", ds.group(1))]
+                block["datasets"] = nums
+            j += 1
+        clusters.append(block)
+        i = j
+    return clusters
+
+
+# --------------------------------------------------------------------------
+# dials.correlation_matrix.html embedded-Plotly-JSON extraction
+# --------------------------------------------------------------------------
+#
+# The HTML written by dials.correlation_matrix embeds several
+# `var graphs_<name> = { ...JSON... };` assignments that feed Plotly. We
+# pull those JSON objects out by name (balanced-brace scan, so nested
+# objects are handled) and parse them with the stdlib json module - no JS
+# engine needed. The graphs we know how to render with matplotlib are
+# listed in CORRMAT_KNOWN_GRAPHS.
+
+
+def _extract_json_object(text: str, start_brace: int) -> Optional[str]:
+    """Given the index of an opening '{' in text, return the substring up
+    to and including its matching '}', respecting braces inside strings."""
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start_brace, len(text)):
+        c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_brace:i + 1]
+    return None
+
+
+def extract_corrmat_graphs(html: str) -> Dict[str, dict]:
+    """Return {graph_name: parsed_json_dict} for every
+    `var graphs_X = {...}` assignment in a dials.correlation_matrix.html.
+    Skips any blob that fails to parse."""
+    out: Dict[str, dict] = {}
+    for m in re.finditer(r"var\s+(graphs_[A-Za-z0-9_]+)\s*=\s*", html):
+        name = m.group(1)
+        brace = html.find("{", m.end())
+        if brace == -1:
+            continue
+        blob = _extract_json_object(html, brace)
+        if blob is None:
+            continue
+        try:
+            out[name] = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def corrmat_matrix(blob: dict) -> Optional[Dict[str, object]]:
+    """cc_cluster / cos_angle_cluster blob -> {'z','order','title'}."""
+    data = blob.get("data", [])
+    heatmap = next((t for t in data if t.get("type") == "heatmap"), None)
+    if heatmap is None or "z" not in heatmap:
+        return None
+    layout = blob.get("layout", {})
+    order = (layout.get("xaxis", {}) or {}).get("ticktext")
+    title = (heatmap.get("colorbar", {}) or {}).get("title", "correlation")
+    return {"z": heatmap["z"], "order": order, "title": title}
+
+
+def corrmat_cluster_series(blob: dict) -> List[Dict[str, object]]:
+    """reachability / cosym-coordinates blob -> list of per-cluster series
+    [{'name','x','y','color'}]. Infinity y-values become None."""
+    out = []
+    for t in blob.get("data", []):
+        ys = []
+        for v in t.get("y", []):
+            if isinstance(v, float) and (v == float("inf") or v != v):
+                ys.append(None)
+            else:
+                ys.append(v)
+        out.append({
+            "name": t.get("name", ""),
+            "x": t.get("x", []),
+            "y": ys,
+            "color": (t.get("marker", {}) or {}).get("color"),
+        })
+    return out
+
+
+def corrmat_xy(blob: dict) -> Optional[Dict[str, object]]:
+    """Single-trace line/bar blob (dimensions, rij histogram) ->
+    {'x','y','type','title','xtitle','ytitle'}."""
+    data = blob.get("data", [])
+    if not data:
+        return None
+    tr = data[0]
+    layout = blob.get("layout", {})
+    return {
+        "x": tr.get("x", []),
+        "y": tr.get("y", []),
+        "type": tr.get("type", "line"),
+        "title": layout.get("title", ""),
+        "xtitle": (layout.get("xaxis", {}) or {}).get("title", ""),
+        "ytitle": (layout.get("yaxis", {}) or {}).get("title", ""),
+    }
+
+
 class ProcessRunner:
     """Runs a command in a background thread, streaming stdout lines to a
     queue so the Tk main loop can poll it without blocking."""
@@ -823,6 +1171,9 @@ class DialsGUI(tk.Tk):
         self.plot_status_var: Optional[tk.StringVar] = None
         self.integrate_progress: Optional[ttk.Progressbar] = None
         self.integrate_progress_var: Optional[tk.StringVar] = None
+        self.plot_page_var: Optional[tk.StringVar] = None
+        self.plot_page_combo = None
+        self.scale_cluster_var: Optional[tk.StringVar] = None
         # Throttle plot redraws while streaming (redrawing on every line is
         # wasteful); only redraw every Nth poll or on completion.
         self._poll_tick = 0
@@ -942,6 +1293,8 @@ class DialsGUI(tk.Tk):
         self.plot_status_var = None
         self.integrate_progress = None
         self.integrate_progress_var = None
+        self.plot_page_var = None
+        self.plot_page_combo = None
         if step.plot_kind and HAVE_MPL:
             plots_tab = ttk.Frame(nb, padding=4)
             nb.add(plots_tab, text="Plots")
@@ -972,7 +1325,7 @@ class DialsGUI(tk.Tk):
         # If a log already exists for this step (e.g. re-selecting a step
         # that ran earlier), populate the plots from it immediately.
         if step.plot_kind and HAVE_MPL:
-            self._refresh_plots_from_text(step, self._current_log_text(step))
+            self._refresh_plots_from_text(step, self._plot_source_text(step))
 
     def _make_readonly_text(self, parent) -> tk.Text:
         frame = ttk.Frame(parent)
@@ -1021,6 +1374,42 @@ class DialsGUI(tk.Tk):
                 self.input_vars[step.id].append(var)
 
         self.field_vars[step.id] = {}
+
+        # Scale step: cluster selector for multi-crystal cluster scaling.
+        # If cluster_N.expt/.refl files exist (written by the Correlation
+        # Matrix step with 'output clusters' ticked), let the user pick one
+        # to scale independently; picking a cluster rewrites the input
+        # files and adds distinct output.* names so runs don't overwrite.
+        self.scale_cluster_var = None
+        if step.id == "scale":
+            clusters = self._available_clusters()
+            row = ttk.Frame(parent)
+            row.pack(fill="x", pady=(4, 2))
+            ttk.Label(row, text="Cluster to scale", width=22).pack(side="left")
+            choices = ["(none - use inputs above)"] + [
+                f"cluster_{c}" for c in clusters
+            ]
+            self.scale_cluster_var = tk.StringVar(value=choices[0])
+            combo = ttk.Combobox(
+                row, textvariable=self.scale_cluster_var,
+                values=choices, width=28, state="readonly",
+            )
+            combo.pack(side="left")
+            if clusters:
+                ttk.Label(
+                    row,
+                    text=f"{len(clusters)} cluster(s) found: "
+                         f"{', '.join(str(c) for c in clusters)}",
+                    foreground="gray",
+                ).pack(side="left", padx=8)
+            else:
+                ttk.Label(
+                    row,
+                    text="(no cluster_N files yet - run Correlation Matrix "
+                         "with 'output clusters')",
+                    foreground="gray",
+                ).pack(side="left", padx=8)
+
         if step.extra_fields:
             ttk.Label(parent, text="Parameters:", font=("", 10, "bold")).pack(
                 anchor="w", pady=(10, 2)
@@ -1065,6 +1454,10 @@ class DialsGUI(tk.Tk):
         for var in list(self.field_vars[step.id].values()) + self.input_vars[step.id]:
             var.trace_add("write", lambda *_: self._update_command_preview())
         self.extra_params_var.trace_add("write", lambda *_: self._update_command_preview())
+        if self.scale_cluster_var is not None:
+            self.scale_cluster_var.trace_add(
+                "write", lambda *_: self._update_command_preview()
+            )
 
         btn_row = ttk.Frame(parent)
         btn_row.pack(anchor="w", pady=12)
@@ -1150,8 +1543,15 @@ class DialsGUI(tk.Tk):
     def _build_command(self, step: StepDef) -> List[str]:
         args: List[str] = []
 
+        cluster = self._selected_cluster()
+
         if step.is_import:
             args.extend(self.image_files)
+        elif step.id == "scale" and cluster is not None:
+            # Cluster scaling: use cluster_N.expt/.refl as input regardless
+            # of the input fields, so each cluster is scaled independently.
+            args.append(f"cluster_{cluster}.expt")
+            args.append(f"cluster_{cluster}.refl")
         else:
             for var in self.input_vars[step.id]:
                 v = var.get().strip()
@@ -1178,6 +1578,18 @@ class DialsGUI(tk.Tk):
             program = "dials.export" if mode_val == "export" else "dials.merge"
             # remove the 'mode' pseudo-parameter, it isn't a real dials param
             args = [a for a in args if not a.startswith("mode=")]
+
+        # Cluster scaling: redirect all outputs to cluster-tagged names so
+        # repeated Scale runs (one per cluster) don't overwrite each other.
+        # This mirrors the tutorial's "mkdir 0 1 2; scale in each" but keeps
+        # everything in one working directory.
+        if step.id == "scale" and cluster is not None:
+            args.extend([
+                f"output.experiments=scaled_cluster_{cluster}.expt",
+                f"output.reflections=scaled_cluster_{cluster}.refl",
+                f"output.html=dials.scale.cluster_{cluster}.html",
+                f"output.log=dials.scale.cluster_{cluster}.log",
+            ])
 
         return [program] + args
 
@@ -1284,25 +1696,87 @@ class DialsGUI(tk.Tk):
         # the "Summary vs image number" and merging-stats tables in
         # particular are written at the very end).
         if step.plot_kind and HAVE_MPL:
-            log_text = self._current_log_text(step)
-            # Prefer whichever source actually contains the end-of-run
-            # tables; fall back to streamed output if the log lags.
-            self._refresh_plots_from_text(
-                step, log_text if log_text.strip() else self.live_output
-            )
+            src = self._plot_source_text(step)
+            # For correlation_matrix the plots come only from the HTML
+            # (stdout has no graph JSON), so use src as-is; for the others
+            # prefer the canonical log but fall back to streamed stdout if
+            # the log hasn't been flushed yet.
+            if step.plot_kind == "correlation_matrix":
+                self._refresh_plots_from_text(step, src)
+            else:
+                self._refresh_plots_from_text(
+                    step, src if src.strip() else self.live_output
+                )
         if not ok:
             self._append_text(
                 self.output_text, f"\n[process exited with code {returncode}]\n"
             )
 
+    # ------------------------------------------------------- clusters --
+    def _available_clusters(self) -> List[int]:
+        """Scan the working directory for cluster_N.expt files (written by
+        dials.correlation_matrix significant_clusters.output=True) and
+        return the sorted list of cluster indices N."""
+        workdir = self.workdir.get()
+        out = []
+        try:
+            for name in os.listdir(workdir):
+                m = re.match(r"cluster_(\d+)\.expt$", name)
+                if m:
+                    out.append(int(m.group(1)))
+        except OSError:
+            return []
+        return sorted(out)
+
+    def _selected_cluster(self) -> Optional[int]:
+        """Return the cluster index currently chosen in the scale step's
+        cluster selector, or None if 'none' / not applicable."""
+        var = getattr(self, "scale_cluster_var", None)
+        if var is None:
+            return None
+        val = var.get()
+        m = re.match(r"cluster_(\d+)$", val or "")
+        return int(m.group(1)) if m else None
+
+    def _scale_log_name(self) -> str:
+        """The log filename dials.scale will write given the current
+        cluster selection (cluster runs redirect output.log)."""
+        cluster = self._selected_cluster()
+        if cluster is not None:
+            return f"dials.scale.cluster_{cluster}.log"
+        return "dials.scale.log"
+
+    def _corrmat_html_text(self) -> str:
+        """Read dials.correlation_matrix.html from the working directory
+        (the source for the correlation_matrix Plots tab). '' if absent."""
+        path = os.path.join(self.workdir.get(), "dials.correlation_matrix.html")
+        if not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def _plot_source_text(self, step: StepDef) -> str:
+        """The text a step's Plots tab should parse: the correlation_matrix
+        step plots from its HTML output (which carries the Plotly JSON
+        blobs), every other plot step from its .log file."""
+        if step.plot_kind == "correlation_matrix":
+            return self._corrmat_html_text()
+        return self._current_log_text(step)
+
     def _current_log_text(self, step: StepDef) -> str:
         """Read back the on-disk log for this step (respecting the dynamic
-        merge/export log-name choice). Returns '' if not present."""
+        merge/export log-name choice and cluster scaling). Returns '' if
+        not present."""
         log_name = step.log_file
         if step.dynamic and step.id == "merge_export":
             mode = self.field_vars.get(step.id, {}).get("mode")
             mode_val = mode.get() if mode else "merge"
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
+        elif step.id == "scale":
+            log_name = self._scale_log_name()
         if not log_name:
             return ""
         path = os.path.join(self.workdir.get(), log_name)
@@ -1320,6 +1794,8 @@ class DialsGUI(tk.Tk):
             mode = self.field_vars.get(step.id, {}).get("mode")
             mode_val = mode.get() if mode else "merge"
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
+        elif step.id == "scale":
+            log_name = self._scale_log_name()
 
         text = ""
         if log_name:
@@ -1342,8 +1818,9 @@ class DialsGUI(tk.Tk):
     def _build_plots_tab(self, parent, step: StepDef):
         """Build the Plots tab for a plot-capable step: an embedded
         matplotlib canvas (with the standard navigation toolbar), a status
-        line, and — for integration — a live block-processing progress
-        bar above the figure."""
+        line, an optional page selector (per data set for find_spots/
+        refine/integrate in multi-crystal mode, per cluster for scale), and
+        — for integration — a live block-processing progress bar."""
         top = ttk.Frame(parent)
         top.pack(fill="x")
 
@@ -1354,12 +1831,40 @@ class DialsGUI(tk.Tk):
         ttk.Label(top, textvariable=self.plot_status_var, foreground="gray").pack(
             side="left", anchor="w"
         )
+        refresh_label = (
+            "Refresh plots from HTML"
+            if step.plot_kind == "correlation_matrix"
+            else "Refresh plots from log"
+        )
         ttk.Button(
-            top, text="Refresh plots from log",
+            top, text=refresh_label,
             command=lambda: self._refresh_plots_from_text(
-                step, self._current_log_text(step)
+                step, self._plot_source_text(step)
             ),
         ).pack(side="right")
+
+        # Page selector: for steps that can span multiple data sets or
+        # clusters, a combobox to flip between one page of plots each.
+        # Rebuilt/populated lazily as data arrives (see _update_plot_pages).
+        self.plot_page_var = None
+        self.plot_page_combo = None
+        if step.plot_kind in ("find_spots", "refine", "integrate", "scale"):
+            page_frame = ttk.Frame(parent)
+            page_frame.pack(fill="x", pady=(4, 2))
+            label = "Cluster" if step.plot_kind == "scale" else "Data set"
+            ttk.Label(page_frame, text=f"{label}:", width=10).pack(side="left")
+            self.plot_page_var = tk.StringVar(value="all")
+            self.plot_page_combo = ttk.Combobox(
+                page_frame, textvariable=self.plot_page_var,
+                values=["all"], width=20, state="readonly",
+            )
+            self.plot_page_combo.pack(side="left")
+            self.plot_page_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e: self._refresh_plots_from_text(
+                    step, self.live_output or self._plot_source_text(step)
+                ),
+            )
 
         # Integration gets a live progress bar for block processing.
         if step.plot_kind == "integrate":
@@ -1382,6 +1887,25 @@ class DialsGUI(tk.Tk):
         toolbar.pack(side="bottom", fill="x")
         self.plot_canvas.draw_idle()
 
+    def _update_plot_pages(self, options: List[str]):
+        """Refresh the page-selector combobox's choices, preserving the
+        current selection if still valid. `options` is e.g. ['all','0',
+        '1',...]. No-op if there's no selector or the options are
+        unchanged."""
+        combo = getattr(self, "plot_page_combo", None)
+        var = getattr(self, "plot_page_var", None)
+        if combo is None or var is None:
+            return
+        if list(combo["values"]) == options:
+            return
+        combo["values"] = options
+        if var.get() not in options:
+            var.set(options[0] if options else "all")
+
+    def _current_plot_page(self) -> str:
+        var = getattr(self, "plot_page_var", None)
+        return var.get() if var is not None else "all"
+
     def _refresh_plots_from_text(self, step: StepDef, text: str):
         """Re-parse `text` for this step and redraw the figure. Safe to
         call repeatedly (live) and with partial/empty text. Dispatches on
@@ -1401,6 +1925,8 @@ class DialsGUI(tk.Tk):
                 self._plot_integrate(text)
             elif kind == "scale":
                 self._plot_scale(text)
+            elif kind == "correlation_matrix":
+                self._plot_correlation_matrix(text)
         except Exception as exc:  # pragma: no cover - defensive redraw guard
             if self.plot_status_var is not None:
                 self.plot_status_var.set(f"(plot error: {exc})")
@@ -1413,6 +1939,8 @@ class DialsGUI(tk.Tk):
 
     def _plot_find_spots(self, text: str):
         data = parse_find_spots(text)
+        histos = parse_find_spots_histograms(text)
+        self._update_plot_pages(["all"])
         fig = self.plot_figure
         fig.clear()
         ax = fig.add_subplot(111)
@@ -1425,18 +1953,70 @@ class DialsGUI(tk.Tk):
             return
         ax.plot(data["image"], data["pixels"], marker=".", linewidth=1)
         ax.set_title("Strong pixels found per image")
-        ax.set_xlabel("Image number")
+        ax.set_xlabel("Image number (across all sweeps)")
         ax.set_ylabel("Number of strong pixels")
         ax.grid(True, alpha=0.3)
-        self._set_plot_status(
-            f"{len(data['image'])} images processed"
-        )
+
+        # Multi-crystal: if the per-imageset histogram headers reveal more
+        # than one data set, mark the (assumed equal-length) sweep
+        # boundaries with light vertical lines so the per-sweep structure of
+        # the single continuous per-image series is visible. The exact
+        # boundaries aren't emitted per image, so this assumes equal-length
+        # sweeps (true for the tutorial's 12x100); it's an annotation aid,
+        # not a claim about exact per-sweep image ranges.
+        n_sets = len(histos)
+        note = ""
+        if n_sets > 1 and data["image"]:
+            n_img = len(data["image"])
+            if n_img % n_sets == 0:
+                per = n_img // n_sets
+                for k in range(1, n_sets):
+                    xb = data["image"][k * per - 1] + 0.5
+                    ax.axvline(xb, color="gray", alpha=0.3, linewidth=0.8)
+                note = f"  |  {n_sets} sweeps (~{per} images each)"
+            else:
+                note = f"  |  {n_sets} sweeps"
+
+        self._set_plot_status(f"{len(data['image'])} images processed{note}")
         fig.tight_layout()
 
     def _plot_refine(self, text: str):
-        data = parse_refine_steps(text)
         fig = self.plot_figure
         fig.clear()
+
+        # Multi-crystal refine writes an "RMSDs by experiment" table (one
+        # row per data set). If present, show per-experiment final RMSDs;
+        # the page selector lets you view all experiments together or the
+        # per-step convergence (which multi refine doesn't tabulate per
+        # experiment, so "all" is the meaningful view here).
+        by_exp = parse_refine_by_experiment(text)
+        if by_exp["exp"]:
+            self._update_plot_pages(["all"])
+            exps = by_exp["exp"]
+            ax1 = fig.add_subplot(211)
+            ax1.plot(exps, by_exp["rmsd_x"], marker="o", label="RMSD_X (px)")
+            ax1.plot(exps, by_exp["rmsd_y"], marker="s", label="RMSD_Y (px)")
+            ax1.set_ylabel("Positional RMSD (px)", fontsize=8)
+            ax1.set_title("Final RMSDs by experiment (multi-crystal)", fontsize=9)
+            ax1.legend(fontsize=7)
+            ax1.grid(True, alpha=0.3)
+
+            ax2 = fig.add_subplot(212)
+            ax2.plot(exps, by_exp["rmsd_z"], marker="^", color="tab:green",
+                     label="RMSD_Z (images)")
+            ax2.set_xlabel("Experiment (data set) id", fontsize=8)
+            ax2.set_ylabel("RMSD_Z (images)", fontsize=8)
+            ax2.legend(fontsize=7)
+            ax2.grid(True, alpha=0.3)
+            self._set_plot_status(
+                f"{len(exps)} experiments (data sets) refined"
+            )
+            fig.tight_layout()
+            return
+
+        # Single-crystal: the "Refinement steps" convergence table.
+        self._update_plot_pages(["all"])
+        data = parse_refine_steps(text)
         ax = fig.add_subplot(111)
         if not data["step"]:
             self._set_plot_status("(waiting for the 'Refinement steps' table...)")
@@ -1469,7 +2049,6 @@ class DialsGUI(tk.Tk):
     def _plot_integrate(self, text: str):
         blocks = parse_integrate_blocks(text)
         progress = parse_integrate_progress(text)
-        summary = parse_integrate_summary(text)
 
         # --- live progress bar (block processing) ---
         if self.integrate_progress is not None and self.integrate_progress_var is not None:
@@ -1496,6 +2075,33 @@ class DialsGUI(tk.Tk):
         # --- end-of-integration line graphs (Summary vs image number) ---
         fig = self.plot_figure
         fig.clear()
+
+        # Split the summary table by data set (ID column). In single-crystal
+        # runs there's just one data set (id 0); in multi-crystal runs there
+        # are many, and the page selector picks which one to show.
+        by_ds = integrate_summary_by_dataset(text)
+        if by_ds:
+            ds_ids = sorted(by_ds)
+            # Page options: one page per data set. (No "all" overlay - with
+            # many data sets that would be unreadable; flip between them.)
+            self._update_plot_pages([str(d) for d in ds_ids])
+            page = self._current_plot_page()
+            try:
+                sel = int(page)
+            except ValueError:
+                sel = ds_ids[0]
+            if sel not in by_ds:
+                sel = ds_ids[0]
+            summary = by_ds[sel]
+            ds_note = (
+                f"  |  data set {sel} of {len(ds_ids)}"
+                if len(ds_ids) > 1 else ""
+            )
+        else:
+            summary = parse_integrate_summary(text)
+            self._update_plot_pages(["all"])
+            ds_note = ""
+
         if not summary["image"]:
             ax = fig.add_subplot(111)
             n = len(blocks)
@@ -1541,18 +2147,24 @@ class DialsGUI(tk.Tk):
         ax4.set_xlabel("Image", fontsize=8)
         ax4.grid(True, alpha=0.3)
 
-        self._set_plot_status(f"Integration summary over {len(img)} images")
+        self._set_plot_status(
+            f"Integration summary over {len(img)} images{ds_note}"
+        )
         fig.tight_layout()
 
     def _plot_scale(self, text: str):
         data = parse_scale_merging(text)
+        self._update_plot_pages(["all"])
+        cluster = self._selected_cluster()
+        cluster_note = f"  |  cluster {cluster}" if cluster is not None else ""
         fig = self.plot_figure
         fig.clear()
         inv = data["inv_d2"]  # type: ignore[assignment]
         if not inv:
             ax = fig.add_subplot(111)
             self._set_plot_status(
-                "(waiting for 'Merging statistics by resolution bin'...)"
+                "(waiting for 'Merging statistics by resolution bin'..."
+                + (f" - cluster {cluster})" if cluster is not None else ")")
             )
             ax.set_title("Merging statistics vs resolution (pending)")
             fig.tight_layout()
@@ -1614,13 +2226,130 @@ class DialsGUI(tk.Tk):
         overall = data.get("overall")
         if isinstance(overall, dict):
             self._set_plot_status(
-                f"{len(inv)} resolution bins  |  overall: "
+                f"{len(inv)} resolution bins{cluster_note}  |  overall: "
                 f"d_min {overall['d_min']:.2f} A, "
                 f"I/sigI {overall['i_over_sigma']:.1f}, "
                 f"CC1/2 {overall['cc_half']:.3f}"
             )
         else:
-            self._set_plot_status(f"{len(inv)} resolution bins")
+            self._set_plot_status(f"{len(inv)} resolution bins{cluster_note}")
+        fig.tight_layout()
+
+    def _plot_correlation_matrix(self, text: str):
+        """Plot the diagnostics embedded in dials.correlation_matrix.html.
+
+        Unlike the other plot kinds, the source here is the HTML file
+        (passed in as `text`), not a .log - it carries Plotly JSON blobs we
+        parse and re-render with matplotlib. Shows: the correlation and
+        cos-angle matrices (as heatmaps), the OPTICS reachability plot
+        (coloured per cluster), the cosym PCA coordinates (per cluster),
+        the dimensions residual curve and the Rij histogram. The page
+        selector isn't used here (it's a fixed multi-panel view)."""
+        import numpy as _np
+        self._update_plot_pages(["all"])
+        fig = self.plot_figure
+        fig.clear()
+
+        graphs = extract_corrmat_graphs(text) if text else {}
+        if not graphs:
+            ax = fig.add_subplot(111)
+            self._set_plot_status(
+                "(run dials.correlation_matrix, or use 'Refresh plots from "
+                "log' - reads dials.correlation_matrix.html)"
+            )
+            ax.set_title("Correlation matrix analysis (pending)")
+            fig.tight_layout()
+            return
+
+        panels = []  # (draw_fn, present?) collected then laid out on a grid
+
+        cc = graphs.get("graphs_cc_cluster")
+        cos = graphs.get("graphs_cos_angle_cluster")
+        reach = graphs.get("graphs_reachability")
+        coords = graphs.get("graphs_cosym_coordinates_principal_components")
+        dims = graphs.get("graphs_dimensions")
+        rij = graphs.get("graphs_cosym_rij_histogram_sg")
+
+        def draw_matrix(ax, blob, default_title):
+            m = corrmat_matrix(blob)
+            if m is None:
+                return
+            z = _np.array(m["z"])
+            im = ax.imshow(z, cmap="YlOrRd", aspect="auto")
+            ax.set_title(m.get("title") or default_title, fontsize=9)
+            ax.tick_params(labelsize=6)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+        def draw_clusters(ax, blob, title, scatter):
+            series = corrmat_cluster_series(blob)
+            for s in series:
+                color = None  # let matplotlib choose; rgb strings from
+                # plotly ("rgb(0.53,0,0.59)") are 0-1 floats and matplotlib
+                # wants 0-1 too, but the format differs, so skip explicit
+                # colour and rely on the cycle for robustness.
+                if scatter:
+                    ax.scatter(s["x"], s["y"], s=10, label=s["name"])
+                else:
+                    ys = [_np.nan if v is None else v for v in s["y"]]
+                    ax.bar(s["x"], ys, label=s["name"])
+            ax.set_title(title, fontsize=9)
+            ax.tick_params(labelsize=6)
+            ax.legend(fontsize=6)
+
+        def draw_xy(ax, blob, logy=False):
+            xy = corrmat_xy(blob)
+            if xy is None:
+                return
+            if xy["type"] == "bar":
+                ax.bar(xy["x"], xy["y"], width=(xy["x"][1] - xy["x"][0]) * 0.9
+                       if len(xy["x"]) > 1 else 0.02)
+            else:
+                ax.plot(xy["x"], xy["y"], marker=".", linewidth=1)
+            if logy:
+                ax.set_yscale("log")
+            ax.set_title(xy["title"] or "", fontsize=9)
+            ax.tick_params(labelsize=6)
+            ax.grid(True, alpha=0.3)
+
+        if cc is not None:
+            panels.append(lambda ax: draw_matrix(ax, cc, "Correlation matrix"))
+        if cos is not None:
+            panels.append(lambda ax: draw_matrix(ax, cos, "cos(angle) matrix"))
+        if reach is not None:
+            panels.append(lambda ax: draw_clusters(
+                ax, reach, "OPTICS reachability", scatter=False))
+        if coords is not None:
+            panels.append(lambda ax: draw_clusters(
+                ax, coords, "Cosym PCA coordinates", scatter=True))
+        if dims is not None:
+            panels.append(lambda ax: draw_xy(ax, dims, logy=True))
+        if rij is not None:
+            panels.append(lambda ax: draw_xy(ax, rij, logy=False))
+
+        n = len(panels)
+        if n == 0:
+            ax = fig.add_subplot(111)
+            ax.set_title("No recognised correlation-matrix graphs found",
+                         fontsize=9)
+            self._set_plot_status("(no plottable graphs in the HTML)")
+            fig.tight_layout()
+            return
+
+        ncols = 2
+        nrows = (n + ncols - 1) // ncols
+        for i, draw in enumerate(panels):
+            ax = fig.add_subplot(nrows, ncols, i + 1)
+            try:
+                draw(ax)
+            except Exception:
+                ax.set_title("(failed to draw)", fontsize=8)
+
+        # Cluster summary from the cc blob's cluster dict, if present.
+        clusters = (cc or {}).get("clusters", {}) if cc else {}
+        self._set_plot_status(
+            f"correlation_matrix: {n} graphs from HTML"
+            + (f"  |  {len(clusters)} dendrogram nodes" if clusters else "")
+        )
         fig.tight_layout()
 
     # --------------------------------------------------------- dials.report --

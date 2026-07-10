@@ -51,10 +51,19 @@ Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
    directly (which needs the reflections re-indexed to match).
 6. **Refine** (`dials.refine`).
 7. **Integrate** (`dials.integrate`) — optional `prediction.d_min`.
-8. **Symmetry Analysis** (`dials.symmetry`).
+8. **Symmetry (single crystal)** (`dials.symmetry`).
+8b. **Cosym (multi-crystal)** (`dials.cosym`) — for many crystals, determines
+    the Patterson symmetry and resolves indexing ambiguity across all data
+    sets at once; use this instead of Symmetry when you indexed with
+    `joint=false`.
+8c. **Correlation Matrix (multi-crystal)** (`dials.correlation_matrix`) —
+    measures pairwise data-set similarity and clusters isomorphous ones
+    (OPTICS). Tick **output clusters** to also write `cluster_0.expt/.refl`,
+    `cluster_1.expt/.refl`, … for independent scaling.
 9. **Scale** (`dials.scale`) — tick `anomalous` for anomalous data, set
    `absorption_level` (low/medium/high) if the sample has significant
-   absorption.
+   absorption, optional `d_min`. For multiple clusters, use the **cluster
+   selector** to scale each `cluster_N` independently (see below).
 10. **Merge / Export** — choose `merge` (`dials.merge`, scaled+merged MTZ)
     or `export` (`dials.export`, scaled but unmerged MTZ), with an
     optional `d_min` cutoff taken from the scaling recommendation.
@@ -65,7 +74,26 @@ freely substitute any intermediate file (e.g. re-run Index against
 `optimised.expt`, or Refine against a different `indexed.expt` after
 re-indexing with a forced space group).
 
-Each step has four tabs (five on the steps that support live plots — see
+### Multiple data sets (Cows / Pigs / People workflow)
+
+The GUI supports the multi-crystal workflow from the tutorial
+`COWS_PIGS_PEOPLE.md`, where many sweeps are imported and processed
+together. The flow is: import many data sets → find spots → **Index with
+'multi-crystal (joint=false)' ticked** (one run, indexes each crystal
+independently) → refine → integrate → **Cosym** (in place of Symmetry) →
+**Correlation Matrix** (with 'output clusters' to split into
+`cluster_N.expt/.refl`) → **Scale each cluster** independently.
+
+To scale clusters, run the Correlation Matrix step with 'output clusters'
+ticked, then go to Scale and pick a cluster from the **Cluster to scale**
+dropdown (it lists the `cluster_N` files it finds). Each cluster run reads
+`cluster_N.expt/.refl` and writes its own `scaled_cluster_N.*`,
+`dials.scale.cluster_N.html` and `dials.scale.cluster_N.log`, so scaling
+one cluster never overwrites another's results (equivalent to the
+tutorial's "make a directory per cluster" approach, but kept in one working
+directory).
+
+Each step has four tabs (five on the steps that support plots — see
 below):
 
 * **Setup & Run** — inputs, parameters, a live command-line preview, and
@@ -76,31 +104,47 @@ below):
   RMSDs, % indexed, space group, merging statistics, etc).
 * **Full Log** — the raw `dials.<program>.log` DIALS itself wrote, with a
   refresh button.
-* **Plots** — *(Find Spots, Refine, Integrate and Scale only)* live-updating
-  matplotlib graphs of the key per-step diagnostics (see below).
+* **Plots** — *(Find Spots, Refine, Integrate, Correlation Matrix and Scale)*
+  live-updating matplotlib graphs of the key per-step diagnostics (see
+  below).
 
 ### Live Plots tab
 
-Four of the steps carry an extra **Plots** tab that fills in live, from the
+These steps carry an extra **Plots** tab that fills in live, from the
 program's streamed stdout, while the step runs (and is re-read from the
-on-disk log afterwards, and whenever you re-select an already-run step).
-It complements the `dials.report` HTML rather than replacing it: these are
-the handful of "is it going well?" traces you watch *while* a long step
-runs, on the same axes DIALS prints them in.
+on-disk log — or, for Correlation Matrix, the HTML — afterwards, and
+whenever you re-select an already-run step). It complements the
+`dials.report` HTML rather than replacing it: these are the handful of "is
+it going well?" traces you watch *while* a long step runs, on the same axes
+DIALS prints them in.
+
+For multiple data sets, Find Spots / Refine / Integrate show **one page of
+plots per data set** (with a **Data set** selector on the Plots tab), and
+Scale shows the merging statistics for whichever cluster is selected in the
+Setup tab.
 
 * **Find Spots** — a line graph of the number of strong pixels found per
   image (from the `Found N strong pixels on image M` output), updating
-  image-by-image as the scan is processed.
-* **Refine** — line graphs of RMSD_X, RMSD_Y (mm, left axis) and RMSD_Phi
-  (deg, right axis) versus refinement step, from the "Refinement steps"
-  table, so you can see the refinement converge.
+  image-by-image as the scan is processed. With multiple sweeps, light
+  vertical lines mark the sweep boundaries.
+* **Refine** — for a single crystal, line graphs of RMSD_X, RMSD_Y (mm,
+  left axis) and RMSD_Phi (deg, right axis) versus refinement step, from
+  the "Refinement steps" table, so you can see the refinement converge. For
+  multiple crystals it shows the final RMSD_X/Y/Z per experiment (data set)
+  from the "RMSDs by experiment" table.
 * **Integrate** — a live **progress bar** tracking block processing (parsed
   from the block table and the per-block `Frames: A -> B` output; the bar
   correctly reflects that integration passes over the blocks twice, once
   for profile modelling and once for integration). When integration
   finishes, the tab shows four line graphs versus image number, taken from
   the "Summary vs image number" table: I/sigma (sum and prf), full/partial
-  reflection counts, CC prf, and RMSD XY.
+  reflection counts, CC prf, and RMSD XY — one page per data set.
+* **Correlation Matrix** — reads the JSON embedded in
+  `dials.correlation_matrix.html` and renders the correlation and cos-angle
+  matrices (heatmaps), the OPTICS reachability plot (coloured per cluster),
+  the cosym PCA coordinates (per cluster), the dimensions residual curve
+  and the Rij histogram. This is where the clusters become visually
+  obvious.
 * **Scale** — line graphs of the per-resolution-bin merging statistics
   (<I/sigma>, CC1/2 and CC_anom, Rmerge/Rmeas/Rpim, and
   completeness/multiplicity). Because resolution bins are non-linear, the
@@ -108,6 +152,7 @@ runs, on the same axes DIALS prints them in.
   bin's d_min and d_max) but tick-labelled with the actual resolution in
   Å. The trailing overall-summary row is excluded from the per-bin traces
   (so it doesn't distort them) and instead reported in the status line.
+  When scaling a cluster, the status line names the cluster.
 
 If `matplotlib` isn't installed, the Plots tab is still present but shows a
 short note on how to enable it; nothing else is affected.

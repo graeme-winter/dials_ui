@@ -113,6 +113,93 @@ gap called out below.
 full-fidelity view; the Plots tab complements it with a few live traces,
 it does not replace it.
 
+## Multi-crystal workflow (COWS_PIGS_PEOPLE) — added later
+
+A second, larger extension added support for the multi-crystal tutorial
+(`ccp4-dls-2024/COWS_PIGS_PEOPLE.md`): import many sweeps, process them
+together, cluster by isomorphism, scale each cluster. Read that tutorial
+before touching any of this. What was added:
+
+- **Index gets a `joint=false` toggle.** New `ExtraField.check_value`
+  field lets a ticked checkbox emit an arbitrary `key=value` (here
+  `joint=false`) instead of the default `key=True`. One `dials.index` run
+  indexes every crystal independently — do NOT loop per data set.
+- **Two new steps**, both `optional=True`, inserted between Symmetry and
+  Scale: `cosym` (`dials.cosym`, id `cosym`, title "8b") which replaces
+  `dials.symmetry` for many crystals and writes the same
+  `symmetrized.expt/.refl`; and `correlation_matrix`
+  (`dials.correlation_matrix`, id `correlation_matrix`, title "8c") with a
+  `significant_clusters.output` checkbox and `plot_kind="correlation_matrix"`.
+  Symmetry was retitled "8. Symmetry (single crystal)".
+- **Cluster-aware Scale.** If `cluster_N.expt` files exist in the working
+  dir (written by correlation_matrix with output clusters), the Scale
+  Setup tab shows a **cluster selector** (`self.scale_cluster_var`).
+  Picking `cluster_N` makes `_build_command` (i) use `cluster_N.expt/.refl`
+  as the inputs regardless of the input fields, and (ii) append
+  `output.experiments=scaled_cluster_N.expt`,
+  `output.reflections=scaled_cluster_N.refl`,
+  `output.html=dials.scale.cluster_N.html`,
+  `output.log=dials.scale.cluster_N.log` so repeated per-cluster runs
+  never overwrite each other (the tutorial's "mkdir per cluster" kept in
+  one directory). `_scale_log_name()`, `_current_log_text()` and
+  `_refresh_log_tab()` all honour the cluster-tagged log name so the
+  Summary/Full Log/Plots tabs read the right file. Helpers:
+  `_available_clusters()` (globs `cluster_(\d+)\.expt`), `_selected_cluster()`.
+- **Per-data-set / per-cluster plot pagination.** `_build_plots_tab` adds
+  a page-selector combobox (`self.plot_page_var` / `plot_page_combo`) for
+  find_spots/refine/integrate/scale. `_update_plot_pages(options)` repopulates
+  it lazily as data arrives (preserving a valid selection);
+  `_current_plot_page()` reads it. Integrate uses it to show one data set
+  at a time (`integrate_summary_by_dataset` splits the "Summary vs image
+  number" table by its ID column); refine shows the multi "RMSDs by
+  experiment" table when present (`parse_refine_by_experiment`) else the
+  single-crystal convergence table; find_spots stays one continuous
+  per-image series but draws sweep-boundary lines when
+  `parse_find_spots_histograms` reveals >1 imageset (assumes equal-length
+  sweeps — annotation aid only, NOT a per-sweep image-range claim).
+- **correlation_matrix plots come from HTML, not a `.log`.** This is the
+  one plot kind whose source is `dials.correlation_matrix.html`, because
+  the plottable data lives in `var graphs_X = {...}` Plotly-JSON blobs
+  embedded in that file (stdout only has the textual cluster list).
+  `_plot_source_text(step)` returns the HTML for this step and the `.log`
+  for all others, and is used at every plot-refresh call site (select_step
+  seeding, `_finish_step`, the Refresh button, the page combo). During a
+  live run the graphs simply show "pending" until the HTML is written at
+  the end — that's expected. Extraction: `extract_corrmat_graphs()`
+  (balanced-brace scan + stdlib `json`; `Infinity` in the reachability
+  data parses fine via json's default `parse_constant`), then
+  `corrmat_matrix` / `corrmat_cluster_series` / `corrmat_xy` shape
+  individual blobs. `_plot_correlation_matrix` draws up to six panels:
+  correlation + cos-angle heatmaps, OPTICS reachability, cosym PCA
+  coordinates, dimensions residual (log-y), Rij histogram. The
+  `graphs_pca_analysis` SPLOM blob is deliberately NOT plotted (too complex
+  for a small matplotlib panel). Plotly rgb() colours are 0-1 floats in a
+  format matplotlib won't take directly, so cluster colours are left to
+  matplotlib's cycle rather than parsed — don't "fix" this by feeding the
+  rgb strings straight in.
+- **The cluster list stdout parser** `parse_cluster_list` reads the
+  `Cluster N / Completeness / Multiplicity / Datasets:...` blocks. It's
+  available for future use (e.g. auto-populating the cluster selector from
+  the correlation_matrix log) but the selector currently globs files
+  instead, which is more robust to what actually got written.
+
+**Testing done for the multi-crystal work (sandbox, matplotlib present via
+Agg):** all new parsers unit-tested against the tutorial's sample tables
+and the user's real `dials.correlation_matrix.html`; every new/changed
+`_plot_*` method exercised and figures eyeballed (the correlation-matrix
+panel correctly shows the three cows/pigs/people clusters); `_build_command`
+tested for the joint toggle, cosym, correlation_matrix, and cluster scaling
+(inputs overridden + distinct output.* names, verified no overwrite);
+module still imports with matplotlib absent. **Not tested against a live
+DIALS multi-crystal run or a live Tk loop** — same gap as the single-crystal
+plots. In particular confirm against real output: that multi `dials.refine`
+prints "RMSDs by experiment" in this exact pipe-table form; that
+`dials.integrate`'s "Summary vs image number" ID column enumerates data
+sets the way `integrate_summary_by_dataset` assumes; that find_spots image
+numbering is global across sweeps (the boundary-line assumption); and that
+`dials.correlation_matrix.html`'s `var graphs_*` blob names/shapes match
+(they did for the supplied file).
+
 ## How report-file selection works (`_report_files_for_step`)
 
 For a given step, in order:
