@@ -655,58 +655,114 @@ def parse_refine_steps(text: str) -> Dict[str, List[float]]:
     return {"step": steps, "rmsd_x": rmsd_x, "rmsd_y": rmsd_y, "rmsd_phi": rmsd_phi}
 
 
-def parse_all_refine_steps(text: str) -> List[Dict[str, List[float]]]:
-    """refine (multi-crystal joint=false): every 'Refinement steps' table
-    in the output, in order, one per refinement run/experiment.
+_REFINE_GROUP_RE = re.compile(
+    r"Selected group of experiments to refine with original ids:\s*([0-9,\s]+)",
+    re.IGNORECASE,
+)
 
-    Returns a list of {'step','rmsd_x','rmsd_y','rmsd_phi'} - one entry per
-    table - so the Plots tab can page between per-run convergence curves.
-    For a single-crystal run this is a list of length 1 (or more, if
-    refinement printed several macrocycle tables).
 
-    The RMSD columns may be in mm (single sweep) or px (multi-crystal); we
-    just take columns 2/3/4 after the integer step in column 0, matching
-    parse_refine_steps. Each table is delimited by its own 'Refinement
-    steps' header and terminated by a blank line after its data rows."""
-    lines = text.splitlines()
-    tables: List[Dict[str, List[float]]] = []
-    i = 0
+def _parse_one_refine_table(lines: List[str], start: int) -> Tuple[Dict[str, List[float]], int]:
+    """Parse a single 'Refinement steps' table whose header is at/after
+    `start`. Returns (table_dict, index_after_table). table_dict is empty
+    if no data rows were found."""
+    tbl = {"step": [], "rmsd_x": [], "rmsd_y": [], "rmsd_phi": []}
+    j = start
     n = len(lines)
-    while i < n:
-        if not _REFINE_HEADER_RE.search(lines[i]):
-            i += 1
-            continue
-        # Collect data rows following this header.
-        tbl = {"step": [], "rmsd_x": [], "rmsd_y": [], "rmsd_phi": []}
-        j = i + 1
-        started = False
-        while j < n:
-            cells = _split_table_row(lines[j])
-            if cells is None:
-                if started and not lines[j].strip():
-                    break
-                j += 1
-                continue
-            if len(cells) < 5:
-                j += 1
-                continue
-            try:
-                step = float(int(cells[0]))
-                x = float(cells[2])
-                y = float(cells[3])
-                phi = float(cells[4])
-            except ValueError:
-                j += 1
-                continue
-            started = True
-            tbl["step"].append(step)
-            tbl["rmsd_x"].append(x)
-            tbl["rmsd_y"].append(y)
-            tbl["rmsd_phi"].append(phi)
+    started = False
+    while j < n:
+        cells = _split_table_row(lines[j])
+        if cells is None:
+            if started and not lines[j].strip():
+                break
             j += 1
-        if tbl["step"]:
-            tables.append(tbl)
-        i = max(j, i + 1)
+            continue
+        if len(cells) < 5:
+            j += 1
+            continue
+        try:
+            step = float(int(cells[0]))
+            x = float(cells[2])
+            y = float(cells[3])
+            phi = float(cells[4])
+        except ValueError:
+            j += 1
+            continue
+        started = True
+        tbl["step"].append(step)
+        tbl["rmsd_x"].append(x)
+        tbl["rmsd_y"].append(y)
+        tbl["rmsd_phi"].append(phi)
+        j += 1
+    return tbl, j
+
+
+def parse_all_refine_steps(text: str) -> List[Dict[str, List[float]]]:
+    """refine (multi-crystal joint=false): one convergence table per
+    refinement RUN, in order.
+
+    A run is delimited by a
+    'Selected group of experiments to refine with original ids: <ids>'
+    line. Within each run, refinement may print several 'Refinement steps'
+    tables (e.g. static then scan-varying macrocycles); we keep only the
+    LAST one in the run (the final convergence). This avoids the earlier
+    bug where every macrocycle table counted as a separate 'run', inflating
+    the run count well beyond the number of experiments actually refined.
+
+    Each returned dict is {'step','rmsd_x','rmsd_y','rmsd_phi','ids'} where
+    'ids' is the original experiment id string from the group marker (or ''
+    if the run wasn't introduced by a marker - e.g. single-crystal refine,
+    which has no such marker and yields a single run from its lone table).
+
+    RMSD columns may be mm (single sweep) or px (multi-crystal); we take
+    columns 2/3/4 after the integer step in column 0."""
+    lines = text.splitlines()
+    n = len(lines)
+
+    # Find the group-marker positions.
+    markers = [(i, m.group(1).strip())
+               for i, line in enumerate(lines)
+               for m in [_REFINE_GROUP_RE.search(line)] if m]
+
+    tables: List[Dict[str, List[float]]] = []
+
+    if not markers:
+        # No group markers (single-crystal refine, or an older/661 DIALS
+        # format): fall back to keeping the LAST 'Refinement steps' table in
+        # the whole output, so we don't over-count macrocycles. (Previously
+        # this returned every table; the final one is the meaningful
+        # convergence for a single run.)
+        last = None
+        i = 0
+        while i < n:
+            if _REFINE_HEADER_RE.search(lines[i]):
+                tbl, j = _parse_one_refine_table(lines, i + 1)
+                if tbl["step"]:
+                    last = tbl
+                i = max(j, i + 1)
+            else:
+                i += 1
+        if last is not None:
+            last["ids"] = ""
+            tables.append(last)
+        return tables
+
+    # With markers: for each run (marker i .. next marker), keep the LAST
+    # 'Refinement steps' table found within that span.
+    for idx, (mstart, ids) in enumerate(markers):
+        mend = markers[idx + 1][0] if idx + 1 < len(markers) else n
+        last = None
+        i = mstart + 1
+        while i < mend:
+            if _REFINE_HEADER_RE.search(lines[i]):
+                tbl, j = _parse_one_refine_table(lines, i + 1)
+                if tbl["step"]:
+                    last = tbl
+                i = max(j, i + 1)
+            else:
+                i += 1
+        if last is not None:
+            last["ids"] = ids
+            tables.append(last)
     return tables
 
 
@@ -1338,6 +1394,17 @@ class DialsGUI(tk.Tk):
         self._check_dials_available()
         self.select_step(STEPS[0])
 
+        # On startup, silently pick up any existing pipeline progress in the
+        # initial working directory (cwd) so the GUI reflects work already
+        # done there, as if it had been run through the GUI. Silent so it
+        # doesn't nag when starting in an empty directory; the user can also
+        # re-run this any time via the "Load state from working dir" button
+        # (e.g. after changing the working directory).
+        try:
+            self._load_state_from_workdir(announce=False)
+        except Exception:
+            pass
+
     # ---------------------------------------------------------- top bar --
     def _build_layout(self):
         top = ttk.Frame(self, padding=6)
@@ -1349,6 +1416,10 @@ class DialsGUI(tk.Tk):
         ttk.Button(top, text="Browse...", command=self._choose_workdir).pack(
             side="left"
         )
+        ttk.Button(
+            top, text="Load state from working dir",
+            command=self._load_state_from_workdir,
+        ).pack(side="left", padx=4)
         self.dials_status_label = ttk.Label(top, text="", foreground="red")
         self.dials_status_label.pack(side="left", padx=12)
 
@@ -1411,12 +1482,106 @@ class DialsGUI(tk.Tk):
         d = filedialog.askdirectory(initialdir=self.workdir.get())
         if d:
             self.workdir.set(d)
+            # Reflect any existing progress in the newly-chosen directory.
+            self.image_files = []
+            try:
+                self._load_state_from_workdir(announce=False)
+            except Exception:
+                pass
 
     def _reset_statuses(self):
         for s in STEPS:
             self.status[s.id] = "pending"
             _, icon = self.step_buttons[s.id]
             icon.config(text=STATUS_ICONS["pending"])
+
+    def _step_outputs_present(self, step: StepDef) -> bool:
+        """True if this step looks 'done' judging by files in the working
+        directory: its declared output files exist, or (for steps that
+        declare none) its log file exists."""
+        workdir = self.workdir.get()
+
+        def here(name: str) -> bool:
+            return os.path.exists(os.path.join(workdir, name))
+
+        # merge/export writes an MTZ or a log depending on the mode; treat
+        # either produced log as done.
+        if step.id == "merge_export":
+            return here("dials.merge.log") or here("dials.export.log") or \
+                here("merged.mtz") or here("scaled.mtz")
+        # scale may have run per-cluster (no plain scaled.expt) - accept any
+        # scale log/result as evidence it ran.
+        if step.id == "scale":
+            if here("scaled.expt") or here("dials.scale.log"):
+                return True
+            try:
+                for nm in os.listdir(workdir):
+                    if re.match(r"dials\.scale\.cluster_\d+\.log$", nm) or \
+                       re.match(r"scaled_cluster_\d+\.expt$", nm):
+                        return True
+            except OSError:
+                pass
+            return False
+        # correlation_matrix declares no outputs; use its HTML/log.
+        if step.id == "correlation_matrix":
+            return here("dials.correlation_matrix.html") or \
+                here("dials.correlation_matrix.log") or \
+                here("dials.correlation_matrix.scaled.html")
+
+        if step.outputs:
+            return all(here(o) for o in step.outputs
+                       if o.endswith((".expt", ".refl")))
+        if step.log_file:
+            return here(step.log_file)
+        return False
+
+    def _load_state_from_workdir(self, announce: bool = True):
+        """Infer pipeline progress from files already in the working
+        directory and update the step status icons accordingly, as if the
+        steps had been run through the GUI. Also repopulates the Import
+        file list from imported.expt if present. Non-destructive: it only
+        marks steps done where evidence exists; others are left pending."""
+        workdir = self.workdir.get()
+        if not os.path.isdir(workdir):
+            if announce:
+                messagebox.showwarning(
+                    "Load state",
+                    f"Working directory does not exist:\n{workdir}",
+                )
+            return 0
+
+        done = 0
+        for s in STEPS:
+            if self._step_outputs_present(s):
+                self.status[s.id] = "done"
+                self.step_buttons[s.id][1].config(text=STATUS_ICONS["done"])
+                done += 1
+            else:
+                # don't clobber a 'running' state; otherwise reset to pending
+                if self.status.get(s.id) != "running":
+                    self.status[s.id] = "pending"
+                    self.step_buttons[s.id][1].config(
+                        text=STATUS_ICONS["pending"]
+                    )
+
+        # If Import ran, reflect imported.expt as the import 'file' so the
+        # Import command preview and downstream defaults make sense. We
+        # only set this if the user hasn't already queued specific images.
+        if os.path.exists(os.path.join(workdir, "imported.expt")) and \
+                not self.image_files:
+            self.image_files = ["imported.expt"]
+
+        # Refresh the currently-displayed step so its Log/Plots/inputs pick
+        # up whatever is now on disk.
+        if self.selected_step is not None:
+            self.select_step(self.selected_step)
+
+        if announce:
+            messagebox.showinfo(
+                "Load state",
+                f"Marked {done} step(s) as done based on files in\n{workdir}",
+            )
+        return done
 
     # ---------------------------------------------------- step display --
     def select_step(self, step: StepDef):
@@ -1565,6 +1730,21 @@ class DialsGUI(tk.Tk):
                          "with 'output clusters')",
                     foreground="gray",
                 ).pack(side="left", padx=8)
+
+            # When a cluster is chosen, fill the Experiment/Reflection file
+            # fields with that cluster's files (cluster_N.expt/.refl), or
+            # restore the symmetrized defaults when '(none)' is chosen. The
+            # input fields are then the single source of truth for the run.
+            def _on_cluster_change(*_):
+                c = self._selected_cluster()
+                exp_var, refl_var = self.input_vars["scale"][:2]
+                if c is not None:
+                    exp_var.set(f"cluster_{c}.expt")
+                    refl_var.set(f"cluster_{c}.refl")
+                else:
+                    exp_var.set("symmetrized.expt")
+                    refl_var.set("symmetrized.refl")
+            self.scale_cluster_var.trace_add("write", _on_cluster_change)
 
         if step.extra_fields:
             ttk.Label(parent, text="Parameters:", font=("", 10, "bold")).pack(
@@ -1732,17 +1912,15 @@ class DialsGUI(tk.Tk):
 
         if step.is_import:
             args.extend(self.image_files)
-        elif step.id == "scale" and cluster is not None:
-            # Cluster scaling: use cluster_N.expt/.refl as input regardless
-            # of the input fields, so each cluster is scaled independently.
-            args.append(f"cluster_{cluster}.expt")
-            args.append(f"cluster_{cluster}.refl")
         elif cm_use_scaled:
             # Correlation matrix on scaled data: use scaled.expt/.refl
             # instead of whatever the input fields say.
             args.append("scaled.expt")
             args.append("scaled.refl")
         else:
+            # Normal case (including cluster scaling): the input fields hold
+            # the right files - for cluster scaling the "Cluster to scale"
+            # selector has already filled them with cluster_N.expt/.refl.
             for var in self.input_vars[step.id]:
                 v = var.get().strip()
                 if v:
@@ -1891,6 +2069,13 @@ class DialsGUI(tk.Tk):
         self.stop_button.config(state="disabled")
         self.runner = None
         self.running_step_id = None
+        # If a scale cluster run just finished, point the Plots/Log "view
+        # cluster" page at it so the results are shown immediately (and the
+        # newly-written log is now on disk to build the page list from).
+        if step.id == "scale" and ok:
+            run_cluster = self._selected_cluster()
+            if run_cluster is not None and self.plot_page_var is not None:
+                self.plot_page_var.set(f"cluster_{run_cluster}")
         self._refresh_log_tab(step)
         # Definitive plot update from the on-disk log (the streamed
         # stdout and the log file should agree, but the log is canonical;
@@ -1931,7 +2116,8 @@ class DialsGUI(tk.Tk):
 
     def _selected_cluster(self) -> Optional[int]:
         """Return the cluster index currently chosen in the scale step's
-        cluster selector, or None if 'none' / not applicable."""
+        'Cluster to scale' selector (what to RUN next), or None if 'none' /
+        not applicable."""
         var = getattr(self, "scale_cluster_var", None)
         if var is None:
             return None
@@ -1939,13 +2125,62 @@ class DialsGUI(tk.Tk):
         m = re.match(r"cluster_(\d+)$", val or "")
         return int(m.group(1)) if m else None
 
+    def _scale_result_clusters(self) -> List[int]:
+        """Cluster indices that already have a scale result on disk
+        (dials.scale.cluster_N.log). These are the clusters whose results
+        can be VIEWED in the Plots / Full Log tabs, independent of which
+        cluster is queued to run."""
+        workdir = self.workdir.get()
+        out = []
+        try:
+            for name in os.listdir(workdir):
+                m = re.match(r"dials\.scale\.cluster_(\d+)\.log$", name)
+                if m:
+                    out.append(int(m.group(1)))
+        except OSError:
+            return []
+        return sorted(out)
+
+    def _scale_view_cluster(self) -> Optional[int]:
+        """Which cluster's *results* the scale Plots/Log tabs should show,
+        taken from the Plots-tab page selector. 'plain' or 'all' -> None
+        (the non-cluster dials.scale.log). This is separate from
+        _selected_cluster (the run target) so you can review cluster 0's
+        results while cluster 1 is queued to run."""
+        page = self._current_plot_page()
+        m = re.match(r"cluster_(\d+)$", page or "")
+        return int(m.group(1)) if m else None
+
     def _scale_log_name(self) -> str:
-        """The log filename dials.scale will write given the current
-        cluster selection (cluster runs redirect output.log)."""
-        cluster = self._selected_cluster()
-        if cluster is not None:
-            return f"dials.scale.cluster_{cluster}.log"
+        """The scale log filename to READ for the Plots / Full Log tabs.
+
+        Prefers the Plots-tab 'view cluster' selection (so completed
+        clusters can be reviewed while another is queued). Falls back to the
+        run-target cluster (useful mid-run before the page list is built),
+        then to the plain dials.scale.log."""
+        view = self._scale_view_cluster()
+        if view is not None:
+            return f"dials.scale.cluster_{view}.log"
+        # If viewing the "plain" page but a cluster is queued and currently
+        # running, show that cluster's log so live updates are visible.
+        run = self._selected_cluster()
+        page = self._current_plot_page()
+        if run is not None and page in (None, "", "all", "plain"):
+            # only fall back to run target if there's no explicit plain view
+            if page != "plain":
+                return f"dials.scale.cluster_{run}.log"
         return "dials.scale.log"
+
+    def _read_workdir_file(self, name: str) -> str:
+        """Read a file from the working directory by name. '' if absent."""
+        path = os.path.join(self.workdir.get(), name)
+        if not os.path.exists(path):
+            return ""
+        try:
+            with open(path, "r", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
 
     def _corrmat_html_text(self) -> str:
         """Read the correlation-matrix HTML from the working directory (the
@@ -2084,12 +2319,33 @@ class DialsGUI(tk.Tk):
                 values=["all"], width=20, state="readonly",
             )
             self.plot_page_combo.pack(side="left")
-            self.plot_page_combo.bind(
-                "<<ComboboxSelected>>",
-                lambda _e: self._refresh_plots_from_text(
-                    step, self.live_output or self._plot_source_text(step)
-                ),
-            )
+
+            def _on_page_change(_e, s=step):
+                # Use the canonical source for the current page. For scale,
+                # _plot_scale reads the selected cluster's log itself (pass
+                # ""). For others, prefer the live stream only while THIS
+                # step is actively running; otherwise read the on-disk log,
+                # so reviewing a completed step (where self.live_output may
+                # be empty or from another step) still parses correctly.
+                # Using stale live_output was the cause of "pick a different
+                # run -> blank, selector jumps back": the parse yielded a
+                # different/empty set of runs so the chosen page vanished.
+                if s.plot_kind == "scale":
+                    self._refresh_plots_from_text(s, "")
+                    self._refresh_log_tab(s)
+                else:
+                    running = self.running_step_id == s.id
+                    src = (self.live_output if running and self.live_output
+                           else self._plot_source_text(s))
+                    self._refresh_plots_from_text(s, src)
+            self.plot_page_combo.bind("<<ComboboxSelected>>", _on_page_change)
+
+            if step.plot_kind == "scale":
+                ttk.Label(
+                    page_frame,
+                    text="(pick a completed cluster to view its results)",
+                    foreground="gray",
+                ).pack(side="left", padx=8)
 
         # Integration and multi-crystal indexing get a live progress bar.
         if step.plot_kind in ("integrate", "index"):
@@ -2300,9 +2556,13 @@ class DialsGUI(tk.Tk):
             fig.tight_layout()
             return
 
-        # One page per run. Label pages "run 1".."run N" (1-based). With a
-        # single table this is just ["run 1"] and behaves like before.
-        page_labels = [f"run {k + 1}" for k in range(len(tables))]
+        # One page per refinement run. Label by the original experiment id
+        # from the "Selected group..." marker when available ("run 1 (id
+        # 0)"), else just "run k". Single-crystal refine has one run.
+        def _label(k, tbl):
+            ids = tbl.get("ids", "")
+            return f"run {k + 1} (id {ids})" if ids != "" else f"run {k + 1}"
+        page_labels = [_label(k, t) for k, t in enumerate(tables)]
         self._update_plot_pages(page_labels)
         page = self._current_plot_page()
         # Map the selected page label back to a table index.
@@ -2451,10 +2711,45 @@ class DialsGUI(tk.Tk):
         fig.tight_layout()
 
     def _plot_scale(self, text: str):
+        # Build the "view cluster" page list from clusters that have a scale
+        # result on disk, so completed clusters can be reviewed even while a
+        # different cluster is queued to run. Pages: "plain" (the
+        # non-cluster dials.scale.log, if present) plus "cluster_N" for each
+        # dials.scale.cluster_N.log found. If nothing cluster-specific
+        # exists yet, fall back to a single "all" page using the text passed
+        # in (covers the live-run and single-crystal cases).
+        result_clusters = self._scale_result_clusters()
+        plain_exists = os.path.exists(
+            os.path.join(self.workdir.get(), "dials.scale.log")
+        )
+        pages: List[str] = []
+        if plain_exists:
+            pages.append("plain")
+        pages.extend(f"cluster_{c}" for c in result_clusters)
+
+        if pages:
+            self._update_plot_pages(pages)
+            # Read the log for the currently-selected view page (this is what
+            # lets you flip between completed clusters' results).
+            view = self._scale_view_cluster()
+            if view is not None:
+                src = self._read_workdir_file(f"dials.scale.cluster_{view}.log")
+                cluster_note = f"  |  cluster {view}"
+            else:
+                src = self._read_workdir_file("dials.scale.log")
+                cluster_note = "  |  (unclustered scale)"
+            # Prefer freshly-streamed text if it clearly contains the merging
+            # table and the on-disk log doesn't yet (mid-run).
+            if "Merging statistics by resolution bin" in (text or "") and \
+               "Merging statistics by resolution bin" not in src:
+                src = text
+            text = src
+        else:
+            self._update_plot_pages(["all"])
+            cluster = self._selected_cluster()
+            cluster_note = f"  |  cluster {cluster}" if cluster is not None else ""
+
         data = parse_scale_merging(text)
-        self._update_plot_pages(["all"])
-        cluster = self._selected_cluster()
-        cluster_note = f"  |  cluster {cluster}" if cluster is not None else ""
         fig = self.plot_figure
         fig.clear()
         inv = data["inv_d2"]  # type: ignore[assignment]
@@ -2462,7 +2757,7 @@ class DialsGUI(tk.Tk):
             ax = fig.add_subplot(111)
             self._set_plot_status(
                 "(waiting for 'Merging statistics by resolution bin'..."
-                + (f" - cluster {cluster})" if cluster is not None else ")")
+                + (cluster_note + ")" if cluster_note else ")")
             )
             ax.set_title("Merging statistics vs resolution (pending)")
             fig.tight_layout()

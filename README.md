@@ -30,6 +30,19 @@ subprocess, streams the live output to screen, and then reads back the
 python3 dials_gui.py
 ```
 
+### Resuming an existing working directory
+
+At startup the GUI looks at the working directory shown at the top and
+marks each pipeline step **done** if its output files are already present,
+so if you've run some or all of the pipeline before (in the GUI or by hand)
+the step status icons reflect that immediately, as if you'd just run it
+through the GUI. Changing the working directory (Browse…) re-scans the new
+directory the same way, and the **Load state from working dir** button
+re-runs the scan on demand. Loading state is non-destructive: it only marks
+steps done where the expected files exist and leaves the rest pending. The
+Full Log / Summary / Plots tabs then read back whatever is on disk for the
+selected step, so you can review earlier results without re-running.
+
 ## How it maps onto the tutorial
 
 Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
@@ -99,12 +112,23 @@ independently) → refine → integrate → **Cosym** (in place of Symmetry) →
 
 To scale clusters, run the Correlation Matrix step with 'output clusters'
 ticked, then go to Scale and pick a cluster from the **Cluster to scale**
-dropdown (it lists the `cluster_N` files it finds). Each cluster run reads
-`cluster_N.expt/.refl` and writes its own `scaled_cluster_N.*`,
-`dials.scale.cluster_N.html` and `dials.scale.cluster_N.log`, so scaling
-one cluster never overwrites another's results (equivalent to the
-tutorial's "make a directory per cluster" approach, but kept in one working
-directory).
+dropdown (it lists the `cluster_N` files it finds). Choosing a cluster fills
+the Experiment file and Reflection file fields with that cluster's
+`cluster_N.expt` / `cluster_N.refl` (choosing '(none)' restores the
+`symmetrized.*` defaults). Each cluster run writes its own
+`scaled_cluster_N.*`, `dials.scale.cluster_N.html` and
+`dials.scale.cluster_N.log`, so scaling one cluster never overwrites
+another's results (equivalent to the tutorial's "make a directory per
+cluster" approach, but kept in one working directory).
+
+Because each cluster's results persist on disk, you can review any
+completed cluster at any time: the Scale **Plots** tab has a **Cluster**
+selector listing every cluster that already has a scale result (plus the
+plain unclustered run if present), and picking one shows that cluster's
+merging-statistics plots and updates the **Full Log** tab to the matching
+`dials.scale.cluster_N.log`. So after scaling cluster 0 and then cluster 1,
+you can still flip back to cluster 0's plots and log. (When a cluster scale
+finishes, its page is selected automatically so you see the fresh results.)
 
 Each step has four tabs (five on the steps that support plots — see
 below):
@@ -133,8 +157,9 @@ DIALS prints them in.
 
 For multiple data sets, Refine and Integrate show **one page of plots per
 run / data set** (with a selector on the Plots tab), Find Spots draws one
-line per imageset on shared axes, and Scale shows the merging statistics for
-whichever cluster is selected in the Setup tab.
+line per imageset on shared axes, and Scale has a **Cluster** selector on
+its Plots tab that lets you view any completed cluster's merging statistics
+(and switches the Full Log tab to match).
 
 * **Index** — for multiple crystals (joint=false), a **progress bar** driven
   by the `Indexing imageset id <id> (k/N)` output (the `(k/N)` is a reliable
@@ -152,9 +177,12 @@ whichever cluster is selected in the Setup tab.
 * **Refine** — line graphs of RMSD_X, RMSD_Y (positional) and RMSD_Phi/Z
   (angular) **versus refinement step**, i.e. the full convergence of a
   refinement run, not just its final RMSDs. For multiple crystals
-  (joint=false) refinement runs separately per experiment and prints one
-  "Refinement steps" table each; the Plots tab pages between them ("run
-  1", "run 2", …) so you see every run's convergence.
+  (joint=false) refinement runs separately per experiment; each run is
+  delimited by a `Selected group of experiments to refine with original
+  ids: N` line, and within a run only the final convergence table is shown
+  (so intermediate macrocycle tables don't inflate the run count). The
+  Plots tab pages between the runs, labelled by the original experiment id
+  ("run 1 (id 0)", "run 2 (id 1)", …).
 * **Integrate** — a live **progress bar** tracking block processing (parsed
   from the block table and the per-block `Frames: A -> B` output; the bar
   correctly reflects that integration passes over the blocks twice, once
@@ -175,7 +203,11 @@ whichever cluster is selected in the Setup tab.
   bin's d_min and d_max) but tick-labelled with the actual resolution in
   Å. The trailing overall-summary row is excluded from the per-bin traces
   (so it doesn't distort them) and instead reported in the status line.
-  When scaling a cluster, the status line names the cluster.
+  The **Cluster** selector on this tab lists every cluster that already has
+  a scale result on disk (plus the plain unclustered run), so you can review
+  each cluster's statistics independently — including after you've moved on
+  to scaling the next cluster; the status line names the cluster being
+  viewed.
 
 If `matplotlib` isn't installed, the Plots tab is still present but shows a
 short note on how to enable it; nothing else is affected.

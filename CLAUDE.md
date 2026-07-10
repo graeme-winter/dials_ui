@@ -137,20 +137,37 @@ before touching any of this. What was added:
   `significant_clusters.output=True`, so cluster_N files are written unless
   the user unticks it) and `plot_kind="correlation_matrix"`.
   Symmetry was retitled "8. Symmetry (single crystal)".
-- **Cluster-aware Scale.** If `cluster_N.expt` files exist in the working
-  dir (written by correlation_matrix with output clusters), the Scale
-  Setup tab shows a **cluster selector** (`self.scale_cluster_var`).
-  Picking `cluster_N` makes `_build_command` (i) use `cluster_N.expt/.refl`
-  as the inputs regardless of the input fields, and (ii) append
-  `output.experiments=scaled_cluster_N.expt`,
-  `output.reflections=scaled_cluster_N.refl`,
-  `output.html=dials.scale.cluster_N.html`,
-  `output.log=dials.scale.cluster_N.log` so repeated per-cluster runs
-  never overwrite each other (the tutorial's "mkdir per cluster" kept in
-  one directory). `_scale_log_name()`, `_current_log_text()` and
-  `_refresh_log_tab()` all honour the cluster-tagged log name so the
-  Summary/Full Log/Plots tabs read the right file. Helpers:
-  `_available_clusters()` (globs `cluster_(\d+)\.expt`), `_selected_cluster()`.
+- **Cluster-aware Scale (two selectors: RUN target vs VIEW target).** If
+  `cluster_N.expt` files exist (from correlation_matrix with output
+  clusters), the Scale Setup tab shows a **"Cluster to scale" selector**
+  (`self.scale_cluster_var`) — the RUN target. A trace on it fills the
+  Experiment/Reflection input fields with `cluster_N.expt/.refl` (or
+  restores `symmetrized.*` on '(none)'), so the input fields are the single
+  source of truth; `_build_command` just reads the fields and, when a
+  cluster is the run target (`_selected_cluster()`), appends
+  `output.experiments=scaled_cluster_N.expt` /
+  `output.reflections=scaled_cluster_N.refl` /
+  `output.html=dials.scale.cluster_N.html` /
+  `output.log=dials.scale.cluster_N.log` so per-cluster runs never overwrite
+  each other (tutorial's "mkdir per cluster", one directory). NOTE:
+  `_build_command` no longer overrides the inputs itself (it used to) — the
+  selector-driven field fill does that now.
+
+  Separately, the Scale **Plots tab page selector** is the VIEW target:
+  `_plot_scale` builds its page list from `_scale_result_clusters()` (globs
+  `dials.scale.cluster_(\d+)\.log` — clusters with results ON DISK) plus a
+  "plain" page if `dials.scale.log` exists, and reads the selected cluster's
+  log itself via `_read_workdir_file`. `_scale_view_cluster()` reads the
+  page; `_scale_log_name()` prefers the view target (so a completed cluster
+  can be reviewed while another is queued/running), falling back to the run
+  target then plain. The page combo's callback for scale also calls
+  `_refresh_log_tab` so the Full Log follows the viewed cluster. `_finish_step`
+  sets the page to the just-scaled cluster so fresh results show. This is
+  what lets you scale cluster 0, then cluster 1, and still flip back to
+  cluster 0's plots+log. Helpers: `_available_clusters()` (run-target list,
+  globs `cluster_(\d+)\.expt`), `_selected_cluster()` (run target),
+  `_scale_result_clusters()` / `_scale_view_cluster()` (view target),
+  `_read_workdir_file()`.
 - **Per-data-set / per-cluster plot pagination.** `_build_plots_tab` adds
   a page-selector combobox (`self.plot_page_var` / `plot_page_combo`) for
   find_spots/refine/integrate/scale. `_update_plot_pages(options)` repopulates
@@ -343,15 +360,30 @@ Three more changes after the multi-crystal work:
   per-image line graph for indexing, so the figure just shows a short note;
   the bar is the content. (The parser function `parse_integrate_progress`
   keeps its name — only the GUI attributes were renamed.)
-- **Refine shows per-run convergence, not just final RMSDs (bug fix).**
-  Previously `_plot_refine` special-cased the multi "RMSDs by experiment"
-  table and showed only final RMSD per experiment. That threw away the
-  actual refinement progress. Now `parse_all_refine_steps` collects EVERY
-  "Refinement steps" table (joint=false refines each crystal separately and
-  prints one table per run), and `_plot_refine` pages between them ("run
-  1".."run N"), each page the full RMSD-vs-step convergence. Single-crystal
-  is just the len==1 case. `parse_refine_by_experiment` is now unused by the
-  plot but kept as a standalone parser.
+- **Refine shows per-run convergence, not just final RMSDs (bug fix), and
+  groups by run correctly (second bug fix).** `_plot_refine` no longer
+  special-cases the "RMSDs by experiment" table; it uses
+  `parse_all_refine_steps`, which now groups by the
+  `Selected group of experiments to refine with original ids: N` marker
+  that precedes each refinement run, and within each run keeps only the
+  LAST "Refinement steps" table (the final macrocycle). An earlier version
+  kept EVERY table, so scan-varying refinement (which prints several
+  macrocycle tables per run) massively inflated the run count — that was
+  the "shows far more runs than there really are" bug. Each returned table
+  carries an `ids` field (the original experiment id string) used for the
+  page label "run k (id N)". No markers (single-crystal, or old format) ->
+  keep the single last table as one run. `parse_refine_by_experiment` is
+  unused by the plot now but kept as a standalone parser.
+- **Page selector no longer blanks / jumps to first when reviewing (bug
+  fix).** The Plots page-change callback (`_on_page_change`) used to pass
+  `self.live_output`, which is stale/empty when reviewing a completed step
+  (it holds the last *run's* stream, or another step's), so the re-parse
+  produced a different/empty set of pages and the chosen page vanished ->
+  `_update_plot_pages` reset the selection and the plot went blank. Now the
+  callback uses the live stream ONLY while THIS step is actively running
+  (`self.running_step_id == step.id`), otherwise the canonical on-disk
+  source via `_plot_source_text`. Applies to refine and integrate pages
+  alike.
 - **Correlation matrix can run after scaling.** New GUI-only `use_scaled`
   check field on the correlation_matrix step (a pseudo-flag like merge/
   export's `mode`, intercepted in `_build_command`, never emitted as a real
@@ -362,6 +394,16 @@ Three more changes after the multi-crystal work:
   the `.scaled.` files when the toggle is on, and a trace on the toggle
   refreshes the Log and Plots tabs immediately. `_FalseVar` is a tiny
   always-False stand-in used as the safe default when looking up the field.
+- **Load state from the working directory.** `_load_state_from_workdir()`
+  infers step completion from files on disk (`_step_outputs_present(step)`:
+  a step's declared `.expt`/`.refl` outputs exist, or for
+  scale/merge_export/correlation_matrix a suitable log/HTML/MTZ or
+  per-cluster result exists) and sets the status icons accordingly, as if
+  run through the GUI. It also seeds `image_files=["imported.expt"]` when
+  present. It's called silently at startup on the cwd, silently after a
+  Browse… change of working directory, and with a confirmation dialog from
+  the "Load state from working dir" button. Non-destructive (only marks
+  done where evidence exists; never clobbers a 'running' step).
 
 `self.report_button` and `self.report_status_var` are rebound every
 time `select_step()` rebuilds the Setup & Run tab (same pattern the
