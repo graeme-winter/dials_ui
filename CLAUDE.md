@@ -124,12 +124,18 @@ before touching any of this. What was added:
   field lets a ticked checkbox emit an arbitrary `key=value` (here
   `joint=false`) instead of the default `key=True`. One `dials.index` run
   indexes every crystal independently — do NOT loop per data set.
+  Separately, `ExtraField.default` now controls a checkbox's *initial*
+  state: `_build_setup_tab` reads it (`"true"/"1"/"yes"` → ticked), so a
+  check field can start checked. `joint` and `anomalous` leave `default`
+  empty (start unticked); `significant_clusters.output` sets `default="True"`.
 - **Two new steps**, both `optional=True`, inserted between Symmetry and
   Scale: `cosym` (`dials.cosym`, id `cosym`, title "8b") which replaces
   `dials.symmetry` for many crystals and writes the same
   `symmetrized.expt/.refl`; and `correlation_matrix`
   (`dials.correlation_matrix`, id `correlation_matrix`, title "8c") with a
-  `significant_clusters.output` checkbox and `plot_kind="correlation_matrix"`.
+  `significant_clusters.output` checkbox (**checked by default**, emits
+  `significant_clusters.output=True`, so cluster_N files are written unless
+  the user unticks it) and `plot_kind="correlation_matrix"`.
   Symmetry was retitled "8. Symmetry (single crystal)".
 - **Cluster-aware Scale.** If `cluster_N.expt` files exist in the working
   dir (written by correlation_matrix with output clusters), the Scale
@@ -150,13 +156,31 @@ before touching any of this. What was added:
   find_spots/refine/integrate/scale. `_update_plot_pages(options)` repopulates
   it lazily as data arrives (preserving a valid selection);
   `_current_plot_page()` reads it. Integrate uses it to show one data set
-  at a time (`integrate_summary_by_dataset` splits the "Summary vs image
-  number" table by its ID column); refine shows the multi "RMSDs by
+  at a time (`integrate_summary_by_dataset` groups the "Summary vs image
+  number" rows by their first column, the imageset/data-set ID 0..N). NOTE:
+  this parser was rewritten after an initial version only ever showed the
+  *last* data set - DIALS may print the summary as one combined table OR as
+  one table per imageset (each with its own "Summary vs image number"
+  header), and the first version anchored on the last header and stopped at
+  the first blank line, so it captured only the final block. The current
+  version scans the whole text and treats any 13+ column pipe row whose
+  first two cells are integers as a data row (header/unit/border rows fail
+  the int parse), so it collects every block regardless of layout. If a
+  future DIALS changes the column count or the ID-first ordering, this is
+  the spot to revisit. refine shows the multi "RMSDs by
   experiment" table when present (`parse_refine_by_experiment`) else the
-  single-crystal convergence table; find_spots stays one continuous
-  per-image series but draws sweep-boundary lines when
-  `parse_find_spots_histograms` reveals >1 imageset (assumes equal-length
-  sweeps — annotation aid only, NOT a per-sweep image-range claim).
+  single-crystal convergence table; find_spots draws one line per imageset
+  on shared axes (`parse_find_spots_by_imageset` splits the output on the
+  `Finding strong spots on imageset N` banner blocks — image numbers
+  restart per imageset, so each imageset is its own series/line captioned
+  by its number, and because every refresh re-parses the whole accumulated
+  stdout, earlier imagesets persist rather than being overwritten). The old
+  approach — one continuous global series with guessed equal-length
+  sweep-boundary lines, via `parse_find_spots`/`parse_find_spots_histograms`
+  — was wrong (image numbers restart per imageset, so the dict-keyed
+  `parse_find_spots` collapsed every imageset onto image 1..100 and only the
+  last survived); those two functions are retained as standalone parsers
+  but are no longer used by the plot.
 - **correlation_matrix plots come from HTML, not a `.log`.** This is the
   one plot kind whose source is `dials.correlation_matrix.html`, because
   the plottable data lives in `var graphs_X = {...}` Plotly-JSON blobs

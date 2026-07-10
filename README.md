@@ -58,8 +58,10 @@ Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
     `joint=false`.
 8c. **Correlation Matrix (multi-crystal)** (`dials.correlation_matrix`) —
     measures pairwise data-set similarity and clusters isomorphous ones
-    (OPTICS). Tick **output clusters** to also write `cluster_0.expt/.refl`,
-    `cluster_1.expt/.refl`, … for independent scaling.
+    (OPTICS). The **output clusters** toggle (`significant_clusters.output=True`)
+    is **on by default**, so it writes `cluster_0.expt/.refl`,
+    `cluster_1.expt/.refl`, … ready for independent scaling; untick it if
+    you only want the analysis/plots and not the split files.
 9. **Scale** (`dials.scale`) — tick `anomalous` for anomalous data, set
    `absorption_level` (low/medium/high) if the sample has significant
    absorption, optional `d_min`. For multiple clusters, use the **cluster
@@ -124,9 +126,13 @@ Scale shows the merging statistics for whichever cluster is selected in the
 Setup tab.
 
 * **Find Spots** — a line graph of the number of strong pixels found per
-  image (from the `Found N strong pixels on image M` output), updating
-  image-by-image as the scan is processed. With multiple sweeps, light
-  vertical lines mark the sweep boundaries.
+  image (from the `Found N strong pixels on image M` output), updating as
+  the scan is processed. find_spots works through one imageset at a time
+  (each introduced by a `Finding strong spots on imageset N` banner), so
+  each imageset is drawn as its **own line on shared axes** — earlier
+  imagesets persist as later ones are added, and the imageset number labels
+  each line in the legend. The X axis is the per-imageset image number
+  (which restarts at 1 for each imageset).
 * **Refine** — for a single crystal, line graphs of RMSD_X, RMSD_Y (mm,
   left axis) and RMSD_Phi (deg, right axis) versus refinement step, from
   the "Refinement steps" table, so you can see the refinement converge. For

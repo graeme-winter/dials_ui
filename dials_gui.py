@@ -361,8 +361,8 @@ STEPS: List[StepDef] = [
         extra_fields=[
             ExtraField("significant_clusters.output",
                        "output clusters (write cluster_N.expt/.refl)",
-                       "check",
-                       help="needed to scale clusters separately"),
+                       "check", default="True",
+                       help="on by default; needed to scale clusters separately"),
         ],
         outputs=[],
         log_file="dials.correlation_matrix.log",
@@ -545,6 +545,56 @@ def parse_find_spots(text: str) -> Dict[str, List[float]]:
         "image": [float(i) for i in images],
         "pixels": [float(by_image[i]) for i in images],
     }
+
+
+# find_spots processes one imageset at a time; each is introduced by a
+# banner block like:
+#   --------------------------------
+#   Finding strong spots on imageset 33
+#   --------------------------------
+# and then emits its own "Found N strong pixels on image M" lines (with M
+# restarting per imageset). We split on these banners so each imageset is a
+# separate series on the plot, captioned by its imageset number.
+_FIND_SPOTS_IMAGESET_RE = re.compile(
+    r"Finding strong spots on imageset\s+(\d+)", re.IGNORECASE
+)
+
+
+def parse_find_spots_by_imageset(text: str) -> List[Dict[str, object]]:
+    """Split find_spots output into per-imageset series.
+
+    Returns a list of {'imageset': int, 'image': [...], 'pixels': [...]}
+    in the order the imagesets appear. Any 'Found ...' lines that occur
+    before the first banner (or if there are no banners at all) are
+    collected under imageset None as a single fallback series, so a
+    single-sweep run - which has no banner - still plots.
+
+    Tolerant of streaming: the currently-processing (last) imageset simply
+    has fewer points until it finishes."""
+    lines = text.splitlines()
+    series: List[Dict[str, object]] = []
+    current: Optional[Dict[str, object]] = None
+
+    def _new(imageset: Optional[int]) -> Dict[str, object]:
+        d: Dict[str, object] = {"imageset": imageset, "image": [], "pixels": []}
+        series.append(d)
+        return d
+
+    for line in lines:
+        banner = _FIND_SPOTS_IMAGESET_RE.search(line)
+        if banner:
+            current = _new(int(banner.group(1)))
+            continue
+        m = _FIND_SPOTS_RE.search(line)
+        if m:
+            if current is None:
+                current = _new(None)
+            current["image"].append(float(m.group(2)))    # type: ignore[union-attr]
+            current["pixels"].append(float(m.group(1)))   # type: ignore[union-attr]
+
+    # Drop any empty banner-only series (e.g. a banner seen but no spot
+    # lines yet is fine to keep; but a trailing empty one adds nothing).
+    return [s for s in series if s["image"]] or series
 
 
 _REFINE_HEADER_RE = re.compile(r"Refinement steps", re.IGNORECASE)
@@ -885,27 +935,34 @@ def parse_refine_by_experiment(text: str) -> Dict[str, List[float]]:
 
 
 def integrate_summary_by_dataset(text: str) -> Dict[int, Dict[str, List[float]]]:
-    """integrate (multi): split the 'Summary vs image number' table by its
-    ID column into {dataset_id: {image, n_full, ...}}. Reuses the same
-    column layout as parse_integrate_summary but keys on column 0 (ID)."""
-    lines = text.splitlines()
-    header_idx = None
-    for i, line in enumerate(lines):
-        if _SUMMARY_VS_IMAGE_RE.search(line):
-            header_idx = i
+    """integrate (multi): split the 'Summary vs image number' data by its
+    first column (the imageset / data set ID, 0..N) into
+    {dataset_id: {image, n_full, ...}}.
+
+    DIALS may print the summary either as one big table or as one table per
+    imageset (each with its own 'Summary vs image number' header). Either
+    way we want *every* such block, keyed by the ID column - so unlike a
+    single-table parser we do NOT anchor on the last header only, and we do
+    NOT stop at the first blank line (which would end after the first
+    block). Instead we scan the whole text and treat any 13+ column pipe
+    row whose first two cells are integers as a data row, ignoring header /
+    border / unit rows. This is robust to multiple blocks and to streaming
+    (partial last block).
+
+    Rows are grouped by ID; within each ID they're kept in the order seen
+    (image number order as DIALS emits them)."""
     out: Dict[int, Dict[str, List[float]]] = {}
-    if header_idx is None:
+    if _SUMMARY_VS_IMAGE_RE.search(text) is None:
         return out
 
-    started = False
-    for line in lines[header_idx + 1:]:
+    for line in text.splitlines():
         cells = _split_table_row(line)
-        if cells is None:
-            if started and not line.strip():
-                break
+        if cells is None or len(cells) < 13:
             continue
-        if len(cells) < 13:
-            continue
+        # A data row: first cell is the dataset ID (int), second is the
+        # image number (int). Header rows ("ID","Image",...) and the
+        # "(sum)"/"(prf)" unit-continuation row fail these int parses and
+        # are skipped.
         try:
             ds = int(cells[0])
             row = [
@@ -924,7 +981,6 @@ def integrate_summary_by_dataset(text: str) -> Dict[int, Dict[str, List[float]]]
             ]
         except (ValueError, IndexError):
             continue
-        started = True
         d = out.setdefault(ds, {k: [] for k in _INTEGRATE_SUMMARY_KEYS})
         for k, v in zip(_INTEGRATE_SUMMARY_KEYS, row):
             d[k].append(v)
@@ -1419,7 +1475,8 @@ class DialsGUI(tk.Tk):
             row.pack(fill="x", pady=2)
             ttk.Label(row, text=f.label, width=22).pack(side="left")
             if f.kind == "check":
-                var: tk.Variable = tk.BooleanVar(value=False)
+                checked = str(f.default).strip().lower() in ("true", "1", "yes")
+                var: tk.Variable = tk.BooleanVar(value=checked)
                 ttk.Checkbutton(row, variable=var).pack(side="left")
             elif f.kind == "combo":
                 var = tk.StringVar(value=f.default)
@@ -1938,46 +1995,54 @@ class DialsGUI(tk.Tk):
             self.plot_status_var.set(msg)
 
     def _plot_find_spots(self, text: str):
-        data = parse_find_spots(text)
-        histos = parse_find_spots_histograms(text)
+        series = parse_find_spots_by_imageset(text)
         self._update_plot_pages(["all"])
         fig = self.plot_figure
         fig.clear()
         ax = fig.add_subplot(111)
-        if not data["image"]:
+
+        # Any series with actual points?
+        nonempty = [s for s in series if s["image"]]
+        if not nonempty:
             self._set_plot_status("(waiting for 'Found N strong pixels' lines...)")
             ax.set_title("Strong pixels per image")
             ax.set_xlabel("Image number")
             ax.set_ylabel("Strong pixels")
             fig.tight_layout()
             return
-        ax.plot(data["image"], data["pixels"], marker=".", linewidth=1)
-        ax.set_title("Strong pixels found per image")
-        ax.set_xlabel("Image number (across all sweeps)")
+
+        # One line per imageset, all on the same axes so earlier imagesets
+        # persist as the run proceeds. Image numbers restart at 1 for each
+        # imageset, so the shared X axis is the per-imageset image number
+        # and each imageset is a separate line (the caption/legend carries
+        # the imageset number from the 'Finding strong spots on imageset N'
+        # banner).
+        labelled = 0
+        for s in nonempty:
+            iset = s["imageset"]
+            label = f"imageset {iset}" if iset is not None else "imageset"
+            ax.plot(s["image"], s["pixels"], marker=".", linewidth=1,
+                    label=label)
+            labelled += 1
+
+        ax.set_title("Strong pixels found per image (one line per imageset)")
+        ax.set_xlabel("Image number (within imageset)")
         ax.set_ylabel("Number of strong pixels")
         ax.grid(True, alpha=0.3)
+        # Only show a legend when it stays readable; for many imagesets the
+        # legend would swamp the plot, so cap it and note the count instead.
+        if labelled <= 12:
+            ax.legend(fontsize=7, ncol=2 if labelled > 6 else 1)
 
-        # Multi-crystal: if the per-imageset histogram headers reveal more
-        # than one data set, mark the (assumed equal-length) sweep
-        # boundaries with light vertical lines so the per-sweep structure of
-        # the single continuous per-image series is visible. The exact
-        # boundaries aren't emitted per image, so this assumes equal-length
-        # sweeps (true for the tutorial's 12x100); it's an annotation aid,
-        # not a claim about exact per-sweep image ranges.
-        n_sets = len(histos)
-        note = ""
-        if n_sets > 1 and data["image"]:
-            n_img = len(data["image"])
-            if n_img % n_sets == 0:
-                per = n_img // n_sets
-                for k in range(1, n_sets):
-                    xb = data["image"][k * per - 1] + 0.5
-                    ax.axvline(xb, color="gray", alpha=0.3, linewidth=0.8)
-                note = f"  |  {n_sets} sweeps (~{per} images each)"
-            else:
-                note = f"  |  {n_sets} sweeps"
-
-        self._set_plot_status(f"{len(data['image'])} images processed{note}")
+        n_sets = sum(1 for s in nonempty if s["imageset"] is not None)
+        total_images = sum(len(s["image"]) for s in nonempty)
+        if n_sets > 1:
+            note = f"{n_sets} imagesets, {total_images} images total"
+        elif n_sets == 1:
+            note = f"imageset {nonempty[0]['imageset']}, {total_images} images"
+        else:
+            note = f"{total_images} images processed"
+        self._set_plot_status(note)
         fig.tight_layout()
 
     def _plot_refine(self, text: str):
