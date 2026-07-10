@@ -171,16 +171,23 @@ before touching any of this. What was added:
   experiment" table when present (`parse_refine_by_experiment`) else the
   single-crystal convergence table; find_spots draws one line per imageset
   on shared axes (`parse_find_spots_by_imageset` splits the output on the
-  `Finding strong spots on imageset N` banner blocks — image numbers
-  restart per imageset, so each imageset is its own series/line captioned
-  by its number, and because every refresh re-parses the whole accumulated
-  stdout, earlier imagesets persist rather than being overwritten). The old
+  banner blocks — image numbers restart per imageset, so each imageset is
+  its own series/line, coloured from `tab20` with cycling markers so many
+  imagesets stay distinct, and because every refresh re-parses the whole
+  accumulated stdout, earlier imagesets persist rather than being
+  overwritten). IMPORTANT: the banner regex `_FIND_SPOTS_IMAGESET_RE` must
+  match DIALS' actual wording, which is **"Finding strong spots IN imageset
+  N"** (confirmed against dials.algorithms.spot_finding.finder) — an earlier
+  version used "on imageset" and never matched, so every "Found N strong
+  pixels on image M" line fell into a single fallback series and the plot
+  showed one joined line in one colour (the reported bug). The regex now
+  accepts in/on and optional "strong" for version robustness. The old
   approach — one continuous global series with guessed equal-length
   sweep-boundary lines, via `parse_find_spots`/`parse_find_spots_histograms`
-  — was wrong (image numbers restart per imageset, so the dict-keyed
-  `parse_find_spots` collapsed every imageset onto image 1..100 and only the
-  last survived); those two functions are retained as standalone parsers
-  but are no longer used by the plot.
+  — was wrong for a second reason too (image numbers restart per imageset,
+  so the dict-keyed `parse_find_spots` collapsed every imageset onto image
+  1..100 and only the last survived); those two functions are retained as
+  standalone parsers but are no longer used by the plot.
 - **correlation_matrix plots come from HTML, not a `.log`.** This is the
   one plot kind whose source is `dials.correlation_matrix.html`, because
   the plottable data lives in `var graphs_X = {...}` Plotly-JSON blobs
@@ -217,12 +224,14 @@ tested for the joint toggle, cosym, correlation_matrix, and cluster scaling
 module still imports with matplotlib absent. **Not tested against a live
 DIALS multi-crystal run or a live Tk loop** — same gap as the single-crystal
 plots. In particular confirm against real output: that multi `dials.refine`
-prints "RMSDs by experiment" in this exact pipe-table form; that
-`dials.integrate`'s "Summary vs image number" ID column enumerates data
-sets the way `integrate_summary_by_dataset` assumes; that find_spots image
-numbering is global across sweeps (the boundary-line assumption); and that
+prints "RMSDs by experiment" in this exact pipe-table form; and that
 `dials.correlation_matrix.html`'s `var graphs_*` blob names/shapes match
-(they did for the supplied file).
+(they did for the supplied file). Two things previously flagged here have
+since been corrected against real DIALS output: the find_spots banner
+wording ("Finding strong spots **in** imageset N", not "on"), and the
+integrate summary parser (now collects every "Summary vs image number"
+block and groups by the ID column, rather than reading only the last block
+— which had shown just one data set).
 
 ## How report-file selection works (`_report_files_for_step`)
 

@@ -549,14 +549,21 @@ def parse_find_spots(text: str) -> Dict[str, List[float]]:
 
 # find_spots processes one imageset at a time; each is introduced by a
 # banner block like:
-#   --------------------------------
-#   Finding strong spots on imageset 33
-#   --------------------------------
+#   --------------------------------------------------------------------
+#   Finding strong spots in imageset 0
+#   --------------------------------------------------------------------
 # and then emits its own "Found N strong pixels on image M" lines (with M
-# restarting per imageset). We split on these banners so each imageset is a
-# separate series on the plot, captioned by its imageset number.
+# a per-imageset frame number, restarting at 1 for each imageset). We split
+# on these banners so each imageset is a separate series on the plot,
+# captioned by its imageset number.
+#
+# The real DIALS wording is "Finding strong spots IN imageset N" (see
+# dials.algorithms.spot_finding.finder). We accept "in" or "on", and allow
+# the phrase to appear with or without the word "strong", to be robust to
+# small wording changes across DIALS versions.
 _FIND_SPOTS_IMAGESET_RE = re.compile(
-    r"Finding strong spots on imageset\s+(\d+)", re.IGNORECASE
+    r"Finding\s+(?:strong\s+)?spots\s+(?:in|on)\s+imageset\s+(\d+)",
+    re.IGNORECASE,
 )
 
 
@@ -2023,15 +2030,28 @@ class DialsGUI(tk.Tk):
         # One line per imageset, all on the same axes so earlier imagesets
         # persist as the run proceeds. Image numbers restart at 1 for each
         # imageset, so the shared X axis is the per-imageset image number
-        # and each imageset is a separate line (the caption/legend carries
-        # the imageset number from the 'Finding strong spots on imageset N'
-        # banner).
+        # and each imageset is a separate line (the legend carries the
+        # imageset number from the 'Finding strong spots in imageset N'
+        # banner). With more imagesets than the default colour cycle (10),
+        # colours would repeat, so we draw from a larger colormap and cycle
+        # marker shapes too, keeping every line visually distinct.
+        import numpy as _np
+        try:
+            import matplotlib.cm as _cm
+            cmap = _cm.get_cmap("tab20")
+        except Exception:
+            cmap = None
+        markers = [".", "o", "s", "^", "v", "D", "x", "+", "*", "<", ">", "p"]
+
+        n = len(nonempty)
         labelled = 0
-        for s in nonempty:
+        for i, s in enumerate(nonempty):
             iset = s["imageset"]
             label = f"imageset {iset}" if iset is not None else "imageset"
-            ax.plot(s["image"], s["pixels"], marker=".", linewidth=1,
-                    label=label)
+            color = cmap(i % 20) if cmap is not None else None
+            marker = markers[(i // 20) % len(markers)] if n > 20 else markers[i % len(markers)]
+            ax.plot(s["image"], s["pixels"], marker=marker, markersize=3,
+                    linewidth=1, color=color, label=label)
             labelled += 1
 
         ax.set_title("Strong pixels found per image (one line per imageset)")

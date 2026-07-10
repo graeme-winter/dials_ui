@@ -132,7 +132,7 @@ Setup tab.
 * **Find Spots** — a line graph of the number of strong pixels found per
   image (from the `Found N strong pixels on image M` output), updating as
   the scan is processed. find_spots works through one imageset at a time
-  (each introduced by a `Finding strong spots on imageset N` banner), so
+  (each introduced by a `Finding strong spots in imageset N` banner), so
   each imageset is drawn as its **own line on shared axes** — earlier
   imagesets persist as later ones are added, and the imageset number labels
   each line in the legend. The X axis is the per-imageset image number
