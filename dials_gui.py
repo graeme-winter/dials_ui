@@ -40,12 +40,13 @@ scaling anomalous vs native data) can be worked through interactively.
 
 Requirements
 ------------
-Python 3.8+ with tkinter (part of the standard library on most
-platforms; on some minimal Linux installs `python3-tk` must be
-installed separately). DIALS itself must already be installed and set
-up in the environment the GUI is launched from (i.e. `dials.import`
-etc. must be on $PATH) - this GUI is a front end, not a replacement,
-for that installation.
+Python 3.8+ with wxPython (install with `pip install wxPython`, or
+`libtbx.pip install wxPython` inside a DIALS/cctbx environment — DIALS
+already ships wxPython for its own viewers, so it is usually present in a
+sourced DIALS environment). DIALS itself must already be installed and
+set up in the environment the GUI is launched from (i.e. `dials.import`
+etc. must be on $PATH) - this GUI is a front end, not a replacement, for
+that installation.
 
 Run with:
 
@@ -65,23 +66,25 @@ import shutil
 import subprocess
 import sys
 import threading
-import tkinter as tk
 import webbrowser
 from dataclasses import dataclass, field
-from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable, Dict, List, Optional, Tuple
 
+import wx
+
 # matplotlib is an optional dependency: the live-plotting "Plots" tab is
-# only offered if it (and its Tk backend) import successfully. The rest of
-# the GUI — the whole pipeline, log summaries, dials.report button — works
-# without it, so a missing matplotlib degrades gracefully to "no Plots
-# tab" rather than failing to start.
+# only offered if it (and its wxAgg backend) import successfully. The rest
+# of the GUI — the whole pipeline, log summaries, dials.report button —
+# works without it, so a missing matplotlib degrades gracefully to "no
+# Plots tab" rather than failing to start.
 try:
     import matplotlib
-    matplotlib.use("TkAgg")
-    from matplotlib.backends.backend_tkagg import (
-        FigureCanvasTkAgg,
-        NavigationToolbar2Tk,
+    matplotlib.use("WXAgg")
+    from matplotlib.backends.backend_wxagg import (
+        FigureCanvasWxAgg as FigureCanvas,
+    )
+    from matplotlib.backends.backend_wxagg import (
+        NavigationToolbar2WxAgg as NavigationToolbar,
     )
     from matplotlib.figure import Figure
     HAVE_MPL = True
@@ -1287,9 +1290,37 @@ def corrmat_xy(blob: dict) -> Optional[Dict[str, object]]:
     }
 
 
+# --------------------------------------------------------------------------
+# Small value-holder helpers
+# --------------------------------------------------------------------------
+#
+# The pure command-building / plot-source helpers below read GUI field
+# values through a uniform `.get()` interface (a hold-over from the Tk
+# StringVar/BooleanVar API). Rather than thread wx widget references through
+# all of that logic, each editable field is wrapped in one of these tiny
+# adapters exposing `.get()` (and `.set()` where the code writes back). The
+# adapter is backed by a live wx control, so `.get()` always reflects the
+# current on-screen value and `.set()` updates the control.
+
+
+class _WidgetVar:
+    """Adapter exposing `.get()` / `.set()` over a wx control that has
+    GetValue/SetValue (TextCtrl, ComboBox, CheckBox)."""
+
+    def __init__(self, ctrl, cast=lambda v: v):
+        self.ctrl = ctrl
+        self._cast = cast
+
+    def get(self):
+        return self._cast(self.ctrl.GetValue())
+
+    def set(self, value):
+        self.ctrl.SetValue(value)
+
+
 class _FalseVar:
-    """Stand-in for a Tk variable that always reports False / empty - used
-    as a safe default when a named field may not exist yet."""
+    """Stand-in for a variable that always reports False / empty - used as a
+    safe default when a named field may not exist yet."""
 
     def get(self):
         return False
@@ -1297,7 +1328,7 @@ class _FalseVar:
 
 class ProcessRunner:
     """Runs a command in a background thread, streaming stdout lines to a
-    queue so the Tk main loop can poll it without blocking."""
+    queue so the wx main loop can poll it without blocking."""
 
     def __init__(self, cmd: List[str], cwd: str):
         self.cmd = cmd
@@ -1356,17 +1387,15 @@ STATUS_ICONS = {
 }
 
 
-class DialsGUI(tk.Tk):
+class DialsFrame(wx.Frame):
     def __init__(self):
-        super().__init__()
-        self.title("DIALS Workflow GUI")
-        self.geometry("1180x760")
+        super().__init__(None, title="DIALS Workflow GUI", size=(1180, 760))
 
-        self.workdir = tk.StringVar(value=os.getcwd())
+        self.workdir_value = os.getcwd()
         self.status = {s.id: "pending" for s in STEPS}
         self.selected_step: Optional[StepDef] = None
-        self.field_vars: dict = {}      # step id -> {field key: tk.Variable}
-        self.input_vars: dict = {}      # step id -> [tk.StringVar per input]
+        self.field_vars: dict = {}      # step id -> {field key: _WidgetVar}
+        self.input_vars: dict = {}      # step id -> [_WidgetVar per input]
         self.image_files: List[str] = []
 
         self.runner: Optional[ProcessRunner] = None
@@ -1375,127 +1404,182 @@ class DialsGUI(tk.Tk):
         # Live-plot state. `live_output` accumulates the raw stdout of the
         # currently running step so the plot parsers (which want the whole
         # text so far) can be re-run on each poll. The plot widgets are
-        # rebuilt per select_step(); `plot_canvas` is None when the
-        # current step has no Plots tab or matplotlib is unavailable.
+        # rebuilt per select_step(); `plot_canvas` is None when the current
+        # step has no Plots tab or matplotlib is unavailable.
         self.live_output: str = ""
-        self.plot_canvas = None          # FigureCanvasTkAgg or None
+        self.plot_canvas = None          # FigureCanvasWxAgg or None
         self.plot_figure = None          # matplotlib Figure or None
-        self.plot_status_var: Optional[tk.StringVar] = None
-        self.progress_bar: Optional[ttk.Progressbar] = None
-        self.progress_var: Optional[tk.StringVar] = None
-        self.plot_page_var: Optional[tk.StringVar] = None
-        self.plot_page_combo = None
-        self.scale_cluster_var: Optional[tk.StringVar] = None
-        self.log_cluster_var: Optional[tk.StringVar] = None
-        self.log_cluster_combo = None
-        # Throttle plot redraws while streaming (redrawing on every line is
-        # wasteful); only redraw every Nth poll or on completion.
+        self.plot_status_label = None    # wx.StaticText or None
+        self.progress_bar = None         # wx.Gauge or None
+        self.progress_label = None       # wx.StaticText or None
+        self.plot_page_combo = None      # wx.ComboBox or None
+        self.scale_cluster_combo = None  # wx.ComboBox or None
+        self.log_cluster_combo = None    # wx.ComboBox or None
+        # Redrawing the figure on every streamed line is wasteful; only
+        # redraw every Nth poll or on completion.
         self._poll_tick = 0
+
+        # Widgets rebuilt per step and referenced elsewhere.
+        self.output_text = None
+        self.summary_text = None
+        self.log_text = None
+        self.command_preview = None
+        self.report_status_label = None
+        self.run_button = None
+        self.stop_button = None
+        self.report_button = None
+        self.extra_params_ctrl = None
+        self.import_listbox = None
+        self.notebook = None
 
         self._build_layout()
         self._check_dials_available()
+
+        # Poll timer for the running subprocess. wx has no direct analogue of
+        # Tk's after()-scheduled polling loop; a repeating timer polls the
+        # ProcessRunner queue while a step runs and is otherwise idle.
+        self._timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_timer, self._timer)
+
         self.select_step(STEPS[0])
 
         # On startup, silently pick up any existing pipeline progress in the
         # initial working directory (cwd) so the GUI reflects work already
         # done there, as if it had been run through the GUI. Silent so it
         # doesn't nag when starting in an empty directory; the user can also
-        # re-run this any time via the "Load state from working dir" button
-        # (e.g. after changing the working directory).
+        # re-run this any time via the "Load state from working dir" button.
         try:
             self._load_state_from_workdir(announce=False)
         except Exception:
             pass
 
+    # ---------------------------------------------------------- workdir --
+    @property
+    def workdir(self):
+        # Kept as a property so the many `self.workdir.get()` call sites in
+        # the ported pure-logic helpers continue to work unchanged.
+        parent = self
+
+        class _WD:
+            def get(_self):
+                return parent.workdir_value
+
+            def set(_self, v):
+                parent.workdir_value = v
+                if parent.workdir_ctrl is not None:
+                    parent.workdir_ctrl.SetValue(v)
+        return _WD()
+
     # ---------------------------------------------------------- top bar --
     def _build_layout(self):
-        top = ttk.Frame(self, padding=6)
-        top.pack(side="top", fill="x")
+        panel = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
 
-        ttk.Label(top, text="Working directory:").pack(side="left")
-        entry = ttk.Entry(top, textvariable=self.workdir, width=70)
-        entry.pack(side="left", padx=4)
-        ttk.Button(top, text="Browse...", command=self._choose_workdir).pack(
-            side="left"
+        # --- top bar ---
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        top.Add(wx.StaticText(panel, label="Working directory:"),
+                0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+        self.workdir_ctrl = wx.TextCtrl(panel, value=self.workdir_value,
+                                        size=(480, -1))
+        top.Add(self.workdir_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+        self.workdir_ctrl.Bind(
+            wx.EVT_TEXT,
+            lambda _e: setattr(self, "workdir_value", self.workdir_ctrl.GetValue()),
         )
-        ttk.Button(
-            top, text="Load state from working dir",
-            command=self._load_state_from_workdir,
-        ).pack(side="left", padx=4)
-        self.dials_status_label = ttk.Label(top, text="", foreground="red")
-        self.dials_status_label.pack(side="left", padx=12)
+        browse_btn = wx.Button(panel, label="Browse...")
+        browse_btn.Bind(wx.EVT_BUTTON, lambda _e: self._choose_workdir())
+        top.Add(browse_btn, 0, wx.ALL, 4)
+        load_btn = wx.Button(panel, label="Load state from working dir")
+        load_btn.Bind(wx.EVT_BUTTON, lambda _e: self._load_state_from_workdir())
+        top.Add(load_btn, 0, wx.ALL, 4)
+        self.dials_status_label = wx.StaticText(panel, label="")
+        self.dials_status_label.SetForegroundColour(wx.RED)
+        top.Add(self.dials_status_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 8)
+        outer.Add(top, 0, wx.EXPAND)
 
-        body = ttk.Frame(self)
-        body.pack(side="top", fill="both", expand=True)
+        # --- body: sidebar + main ---
+        body = wx.BoxSizer(wx.HORIZONTAL)
 
-        # --- sidebar -------------------------------------------------
-        side = ttk.Frame(body, padding=4)
-        side.pack(side="left", fill="y")
+        side = wx.BoxSizer(wx.VERTICAL)
+        hdr = wx.StaticText(panel, label="Pipeline steps")
+        hdr.SetFont(hdr.GetFont().Bold())
+        side.Add(hdr, 0, wx.ALL, 4)
 
-        ttk.Label(side, text="Pipeline steps", font=("", 11, "bold")).pack(
-            anchor="w"
-        )
         self.step_buttons: dict = {}
         for s in STEPS:
-            btn_frame = ttk.Frame(side)
-            btn_frame.pack(fill="x", pady=1)
-            icon = ttk.Label(btn_frame, text=STATUS_ICONS["pending"], width=2)
-            icon.pack(side="left")
-            btn = ttk.Button(
-                btn_frame,
-                text=s.title,
-                command=lambda s=s: self.select_step(s),
-                width=32,
-            )
-            btn.pack(side="left", fill="x", expand=True)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            icon = wx.StaticText(panel, label=STATUS_ICONS["pending"],
+                                 size=(20, -1))
+            row.Add(icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
+            btn = wx.Button(panel, label=s.title, size=(260, -1))
+            btn.Bind(wx.EVT_BUTTON, lambda _e, st=s: self.select_step(st))
+            row.Add(btn, 1, wx.EXPAND)
+            side.Add(row, 0, wx.EXPAND | wx.BOTTOM, 1)
             self.step_buttons[s.id] = (btn, icon)
 
-        ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Label(side, text="Viewing tools", font=("", 11, "bold")).pack(
-            anchor="w"
-        )
+        side.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 8)
+        vh = wx.StaticText(panel, label="Viewing tools")
+        vh.SetFont(vh.GetFont().Bold())
+        side.Add(vh, 0, wx.ALL, 4)
         for label, program, arg_labels in TOOLS:
-            ttk.Button(
-                side,
-                text=label,
-                command=lambda p=program, a=arg_labels: self.launch_tool(p, a),
-            ).pack(fill="x", pady=1)
+            b = wx.Button(panel, label=label)
+            b.Bind(
+                wx.EVT_BUTTON,
+                lambda _e, p=program, a=arg_labels: self.launch_tool(p, a),
+            )
+            side.Add(b, 0, wx.EXPAND | wx.BOTTOM, 1)
 
-        ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
-        ttk.Button(
-            side, text="Reset all step statuses",
-            command=self._reset_statuses,
-        ).pack(fill="x")
+        side.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 8)
+        reset_btn = wx.Button(panel, label="Reset all step statuses")
+        reset_btn.Bind(wx.EVT_BUTTON, lambda _e: self._reset_statuses())
+        side.Add(reset_btn, 0, wx.EXPAND)
 
-        # --- main panel -----------------------------------------------
-        self.main = ttk.Frame(body, padding=6)
-        self.main.pack(side="left", fill="both", expand=True)
+        body.Add(side, 0, wx.EXPAND | wx.ALL, 4)
+
+        # main panel holds the per-step notebook, rebuilt by select_step().
+        self.main_panel = wx.Panel(panel)
+        self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.main_panel.SetSizer(self.main_sizer)
+        body.Add(self.main_panel, 1, wx.EXPAND | wx.ALL, 6)
+
+        outer.Add(body, 1, wx.EXPAND)
+        panel.SetSizer(outer)
+        self._root_panel = panel
 
     def _check_dials_available(self):
         if shutil.which("dials.import") is None:
-            self.dials_status_label.config(
-                text="Warning: dials.import not found on $PATH - "
-                "make sure your DIALS environment is set up.",
+            self.dials_status_label.SetLabel(
+                "Warning: dials.import not found on $PATH - "
+                "make sure your DIALS environment is set up."
             )
+            self.dials_status_label.SetForegroundColour(wx.RED)
         else:
-            self.dials_status_label.config(text="DIALS found on $PATH", foreground="green")
+            self.dials_status_label.SetLabel("DIALS found on $PATH")
+            self.dials_status_label.SetForegroundColour(
+                wx.Colour(0, 128, 0)
+            )
+        self.dials_status_label.GetParent().Layout()
 
     def _choose_workdir(self):
-        d = filedialog.askdirectory(initialdir=self.workdir.get())
-        if d:
-            self.workdir.set(d)
+        dlg = wx.DirDialog(self, "Choose working directory",
+                           defaultPath=self.workdir_value)
+        if dlg.ShowModal() == wx.ID_OK:
+            d = dlg.GetPath()
+            self.workdir_value = d
+            self.workdir_ctrl.SetValue(d)
             # Reflect any existing progress in the newly-chosen directory.
             self.image_files = []
             try:
                 self._load_state_from_workdir(announce=False)
             except Exception:
                 pass
+        dlg.Destroy()
 
     def _reset_statuses(self):
         for s in STEPS:
             self.status[s.id] = "pending"
             _, icon = self.step_buttons[s.id]
-            icon.config(text=STATUS_ICONS["pending"])
+            icon.SetLabel(STATUS_ICONS["pending"])
 
     def _step_outputs_present(self, step: StepDef) -> bool:
         """True if this step looks 'done' judging by files in the working
@@ -1540,15 +1624,15 @@ class DialsGUI(tk.Tk):
     def _load_state_from_workdir(self, announce: bool = True):
         """Infer pipeline progress from files already in the working
         directory and update the step status icons accordingly, as if the
-        steps had been run through the GUI. Also repopulates the Import
-        file list from imported.expt if present. Non-destructive: it only
-        marks steps done where evidence exists; others are left pending."""
+        steps had been run through the GUI. Also repopulates the Import file
+        list from imported.expt if present. Non-destructive: it only marks
+        steps done where evidence exists; others are left pending."""
         workdir = self.workdir.get()
         if not os.path.isdir(workdir):
             if announce:
-                messagebox.showwarning(
-                    "Load state",
+                wx.MessageBox(
                     f"Working directory does not exist:\n{workdir}",
+                    "Load state", wx.OK | wx.ICON_WARNING,
                 )
             return 0
 
@@ -1556,19 +1640,19 @@ class DialsGUI(tk.Tk):
         for s in STEPS:
             if self._step_outputs_present(s):
                 self.status[s.id] = "done"
-                self.step_buttons[s.id][1].config(text=STATUS_ICONS["done"])
+                self.step_buttons[s.id][1].SetLabel(STATUS_ICONS["done"])
                 done += 1
             else:
                 # don't clobber a 'running' state; otherwise reset to pending
                 if self.status.get(s.id) != "running":
                     self.status[s.id] = "pending"
-                    self.step_buttons[s.id][1].config(
-                        text=STATUS_ICONS["pending"]
+                    self.step_buttons[s.id][1].SetLabel(
+                        STATUS_ICONS["pending"]
                     )
 
         # If Import ran, reflect imported.expt as the import 'file' so the
-        # Import command preview and downstream defaults make sense. We
-        # only set this if the user hasn't already queued specific images.
+        # Import command preview and downstream defaults make sense. We only
+        # set this if the user hasn't already queued specific images.
         if os.path.exists(os.path.join(workdir, "imported.expt")) and \
                 not self.image_files:
             self.image_files = ["imported.expt"]
@@ -1579,55 +1663,53 @@ class DialsGUI(tk.Tk):
             self.select_step(self.selected_step)
 
         if announce:
-            messagebox.showinfo(
-                "Load state",
+            wx.MessageBox(
                 f"Marked {done} step(s) as done based on files in\n{workdir}",
+                "Load state", wx.OK | wx.ICON_INFORMATION,
             )
         return done
 
     # ---------------------------------------------------- step display --
     def select_step(self, step: StepDef):
         self.selected_step = step
-        for widget in self.main.winfo_children():
-            widget.destroy()
 
-        nb = ttk.Notebook(self.main)
-        nb.pack(fill="both", expand=True)
+        # Rebuild the main panel's notebook from scratch for this step.
+        self.main_sizer.Clear(delete_windows=True)
+        self.notebook = wx.Notebook(self.main_panel)
 
-        setup_tab = ttk.Frame(nb, padding=8)
-        output_tab = ttk.Frame(nb, padding=4)
-        summary_tab = ttk.Frame(nb, padding=4)
-        log_tab = ttk.Frame(nb, padding=4)
-        nb.add(setup_tab, text="Setup & Run")
-        nb.add(output_tab, text="Live Output")
-        nb.add(summary_tab, text="Summary")
-        nb.add(log_tab, text="Full Log")
+        setup_tab = wx.Panel(self.notebook)
+        output_tab = wx.Panel(self.notebook)
+        summary_tab = wx.Panel(self.notebook)
+        log_tab = wx.Panel(self.notebook)
+        self.notebook.AddPage(setup_tab, "Setup & Run")
+        self.notebook.AddPage(output_tab, "Live Output")
+        self.notebook.AddPage(summary_tab, "Summary")
+        self.notebook.AddPage(log_tab, "Full Log")
 
         self._build_setup_tab(setup_tab, step)
         self.output_text = self._make_readonly_text(output_tab)
         self.summary_text = self._make_readonly_text(summary_tab)
         self.log_text = self._make_readonly_text(log_tab)
 
-        # Plots tab — only for steps that declare a plot_kind, and only if
-        # matplotlib is available. Reset per-step plot state first so a
-        # step without plots doesn't inherit a stale canvas.
+        # Reset per-step plot state first so a step without plots doesn't
+        # inherit a stale canvas.
         self.plot_canvas = None
         self.plot_figure = None
-        self.plot_status_var = None
+        self.plot_status_label = None
         self.progress_bar = None
-        self.progress_var = None
-        self.plot_page_var = None
+        self.progress_label = None
         self.plot_page_combo = None
         if step.plot_kind and HAVE_MPL:
-            plots_tab = ttk.Frame(nb, padding=4)
-            nb.add(plots_tab, text="Plots")
+            plots_tab = wx.Panel(self.notebook)
+            self.notebook.AddPage(plots_tab, "Plots")
             self._build_plots_tab(plots_tab, step)
         elif step.plot_kind and not HAVE_MPL:
-            plots_tab = ttk.Frame(nb, padding=8)
-            nb.add(plots_tab, text="Plots")
-            ttk.Label(
+            plots_tab = wx.Panel(self.notebook)
+            self.notebook.AddPage(plots_tab, "Plots")
+            s = wx.BoxSizer(wx.VERTICAL)
+            lbl = wx.StaticText(
                 plots_tab,
-                text=(
+                label=(
                     "Live plots for this step need matplotlib, which isn't "
                     "installed in this environment.\n\nInstall it into your "
                     "DIALS/Python environment (e.g. `pip install matplotlib` "
@@ -1636,133 +1718,129 @@ class DialsGUI(tk.Tk):
                     "step, the log Summary, and the 'Run and show report in "
                     "web browser' button — works without it."
                 ),
-                wraplength=760, justify="left",
-            ).pack(anchor="w")
+            )
+            lbl.Wrap(760)
+            s.Add(lbl, 0, wx.ALL, 8)
+            plots_tab.SetSizer(s)
 
-        # Full Log tab controls. For the scale step, add a selector to
-        # choose WHICH log to show: the plain dials.scale.log (default) or
-        # any completed cluster's dials.scale.cluster_N.log. This is
-        # independent of the Plots-tab cluster view.
-        self.log_cluster_var = None
+        # Full Log tab controls. For the scale step, add a selector to choose
+        # WHICH log to show: the plain dials.scale.log (default) or any
+        # completed cluster's dials.scale.cluster_N.log. This is independent
+        # of the Plots-tab cluster view.
         self.log_cluster_combo = None
-        log_ctrl = ttk.Frame(log_tab)
-        log_ctrl.pack(anchor="w", pady=(4, 0), fill="x")
-        ttk.Button(
-            log_ctrl, text="Refresh from log file",
-            command=lambda: self._refresh_log_tab(step),
-        ).pack(side="left")
+        log_ctrl = wx.BoxSizer(wx.HORIZONTAL)
+        refresh_log_btn = wx.Button(log_tab, label="Refresh from log file")
+        refresh_log_btn.Bind(
+            wx.EVT_BUTTON, lambda _e, st=step: self._refresh_log_tab(st)
+        )
+        log_ctrl.Add(refresh_log_btn, 0, wx.ALL, 2)
         if step.id == "scale":
             result_clusters = self._scale_result_clusters()
             choices = ["dials.scale.log (default)"] + [
                 f"cluster_{c}" for c in result_clusters
             ]
-            self.log_cluster_var = tk.StringVar(value=choices[0])
-            ttk.Label(log_ctrl, text="   Log:").pack(side="left")
-            log_combo = ttk.Combobox(
-                log_ctrl, textvariable=self.log_cluster_var,
-                values=choices, width=24, state="readonly",
+            log_ctrl.Add(wx.StaticText(log_tab, label="   Log:"),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+            self.log_cluster_combo = wx.ComboBox(
+                log_tab, choices=choices, value=choices[0],
+                style=wx.CB_READONLY, size=(200, -1),
             )
-            log_combo.pack(side="left")
-            self.log_cluster_combo = log_combo
-            log_combo.bind(
-                "<<ComboboxSelected>>",
-                lambda _e, s=step: self._refresh_log_tab(s),
+            log_ctrl.Add(self.log_cluster_combo, 0, wx.ALL, 2)
+            self.log_cluster_combo.Bind(
+                wx.EVT_COMBOBOX,
+                lambda _e, st=step: self._refresh_log_tab(st),
             )
+        # Insert the log controls above the read-only text in the log tab.
+        log_sizer = log_tab.GetSizer()
+        log_sizer.Insert(0, log_ctrl, 0, wx.EXPAND)
+        log_tab.Layout()
 
         self._refresh_log_tab(step)
-        # If a log already exists for this step (e.g. re-selecting a step
-        # that ran earlier), populate the plots from it immediately.
+        # If a log already exists for this step (e.g. re-selecting a step that
+        # ran earlier), populate the plots from it immediately.
         if step.plot_kind and HAVE_MPL:
             self._refresh_plots_from_text(step, self._plot_source_text(step))
 
-    def _make_readonly_text(self, parent) -> tk.Text:
-        frame = ttk.Frame(parent)
-        frame.pack(fill="both", expand=True)
-        txt = tk.Text(frame, wrap="none", height=30)
-        vsb = ttk.Scrollbar(frame, orient="vertical", command=txt.yview)
-        hsb = ttk.Scrollbar(frame, orient="horizontal", command=txt.xview)
-        txt.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        txt.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        txt.config(state="disabled", font=("Courier", 10))
+        self.main_sizer.Add(self.notebook, 1, wx.EXPAND)
+        self.main_panel.Layout()
+
+    def _make_readonly_text(self, parent) -> wx.TextCtrl:
+        sizer = parent.GetSizer()
+        if sizer is None:
+            sizer = wx.BoxSizer(wx.VERTICAL)
+            parent.SetSizer(sizer)
+        txt = wx.TextCtrl(
+            parent,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_DONTWRAP | wx.HSCROLL,
+        )
+        txt.SetFont(wx.Font(wx.FontInfo(10).Family(wx.FONTFAMILY_TELETYPE)))
+        sizer.Add(txt, 1, wx.EXPAND | wx.ALL, 4)
         return txt
 
-    def _set_text(self, widget: tk.Text, content: str):
-        widget.config(state="normal")
-        widget.delete("1.0", "end")
-        widget.insert("1.0", content)
-        widget.config(state="disabled")
+    def _set_text(self, widget: wx.TextCtrl, content: str):
+        widget.ChangeValue(content)
 
-    def _append_text(self, widget: tk.Text, content: str):
-        widget.config(state="normal")
-        widget.insert("end", content)
-        widget.see("end")
-        widget.config(state="disabled")
+    def _append_text(self, widget: wx.TextCtrl, content: str):
+        widget.AppendText(content)
 
     def _build_setup_tab(self, parent, step: StepDef):
-        ttk.Label(
-            parent, text=step.help, wraplength=760, justify="left"
-        ).pack(anchor="w", pady=(0, 10))
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        parent.SetSizer(sizer)
+
+        help_lbl = wx.StaticText(parent, label=step.help)
+        help_lbl.Wrap(760)
+        sizer.Add(help_lbl, 0, wx.ALL, 6)
 
         self.input_vars[step.id] = []
         if step.is_import:
-            self._build_import_inputs(parent, step)
+            self._build_import_inputs(parent, sizer, step)
         else:
             for spec in step.inputs:
-                row = ttk.Frame(parent)
-                row.pack(fill="x", pady=2)
-                ttk.Label(row, text=spec.label, width=22).pack(side="left")
-                var = tk.StringVar(value=spec.default)
-                ttk.Entry(row, textvariable=var, width=50).pack(
-                    side="left", fill="x", expand=True
-                )
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                row.Add(wx.StaticText(parent, label=spec.label, size=(170, -1)),
+                        0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+                ctrl = wx.TextCtrl(parent, value=spec.default, size=(360, -1))
+                row.Add(ctrl, 1, wx.ALL, 2)
+                sizer.Add(row, 0, wx.EXPAND)
+                var = _WidgetVar(ctrl)
                 self.input_vars[step.id].append(var)
+                ctrl.Bind(wx.EVT_TEXT,
+                          lambda _e: self._update_command_preview())
 
         self.field_vars[step.id] = {}
 
         # Scale step: cluster selector for multi-crystal cluster scaling.
         # If cluster_N.expt/.refl files exist (written by the Correlation
-        # Matrix step with 'output clusters' ticked), let the user pick one
-        # to scale independently; picking a cluster rewrites the input
-        # files and adds distinct output.* names so runs don't overwrite.
-        self.scale_cluster_var = None
+        # Matrix step with 'output clusters' ticked), let the user pick one to
+        # scale independently; picking a cluster rewrites the input files and
+        # adds distinct output.* names so runs don't overwrite.
+        self.scale_cluster_combo = None
         if step.id == "scale":
             clusters = self._available_clusters()
-            row = ttk.Frame(parent)
-            row.pack(fill="x", pady=(4, 2))
-            ttk.Label(row, text="Cluster to scale", width=22).pack(side="left")
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            row.Add(wx.StaticText(parent, label="Cluster to scale",
+                                  size=(170, -1)),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
             choices = ["(none - use inputs above)"] + [
                 f"cluster_{c}" for c in clusters
             ]
-            self.scale_cluster_var = tk.StringVar(value=choices[0])
-            combo = ttk.Combobox(
-                row, textvariable=self.scale_cluster_var,
-                values=choices, width=28, state="readonly",
+            self.scale_cluster_combo = wx.ComboBox(
+                parent, choices=choices, value=choices[0],
+                style=wx.CB_READONLY, size=(220, -1),
             )
-            combo.pack(side="left")
+            row.Add(self.scale_cluster_combo, 0, wx.ALL, 2)
             if clusters:
-                ttk.Label(
-                    row,
-                    text=f"{len(clusters)} cluster(s) found: "
-                         f"{', '.join(str(c) for c in clusters)}",
-                    foreground="gray",
-                ).pack(side="left", padx=8)
+                note = (f"{len(clusters)} cluster(s) found: "
+                        f"{', '.join(str(c) for c in clusters)}")
             else:
-                ttk.Label(
-                    row,
-                    text="(no cluster_N files yet - run Correlation Matrix "
-                         "with 'output clusters')",
-                    foreground="gray",
-                ).pack(side="left", padx=8)
+                note = ("(no cluster_N files yet - run Correlation Matrix "
+                        "with 'output clusters')")
+            note_lbl = wx.StaticText(parent, label=note)
+            note_lbl.SetForegroundColour(wx.Colour(128, 128, 128))
+            row.Add(note_lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+            sizer.Add(row, 0, wx.EXPAND | wx.TOP, 4)
 
-            # When a cluster is chosen, fill the Experiment/Reflection file
-            # fields with that cluster's files (cluster_N.expt/.refl), or
-            # restore the symmetrized defaults when '(none)' is chosen. The
-            # input fields are then the single source of truth for the run.
-            def _on_cluster_change(*_):
+            def _on_cluster_change(_e):
                 c = self._selected_cluster()
                 exp_var, refl_var = self.input_vars["scale"][:2]
                 if c is not None:
@@ -1771,67 +1849,68 @@ class DialsGUI(tk.Tk):
                 else:
                     exp_var.set("symmetrized.expt")
                     refl_var.set("symmetrized.refl")
-            self.scale_cluster_var.trace_add("write", _on_cluster_change)
+                self._update_command_preview()
+            self.scale_cluster_combo.Bind(wx.EVT_COMBOBOX, _on_cluster_change)
 
         if step.extra_fields:
-            ttk.Label(parent, text="Parameters:", font=("", 10, "bold")).pack(
-                anchor="w", pady=(10, 2)
-            )
+            ph = wx.StaticText(parent, label="Parameters:")
+            ph.SetFont(ph.GetFont().Bold())
+            sizer.Add(ph, 0, wx.ALL, 4)
         for f in step.extra_fields:
-            row = ttk.Frame(parent)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f.label, width=22).pack(side="left")
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            row.Add(wx.StaticText(parent, label=f.label, size=(170, -1)),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
             if f.kind == "check":
                 checked = str(f.default).strip().lower() in ("true", "1", "yes")
-                var: tk.Variable = tk.BooleanVar(value=checked)
-                ttk.Checkbutton(row, variable=var).pack(side="left")
+                cb = wx.CheckBox(parent)
+                cb.SetValue(checked)
+                row.Add(cb, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+                var = _WidgetVar(cb)
+                cb.Bind(wx.EVT_CHECKBOX,
+                        lambda _e: self._update_command_preview())
             elif f.kind == "combo":
-                var = tk.StringVar(value=f.default)
-                ttk.Combobox(
-                    row, textvariable=var, values=f.choices or [], width=20
-                ).pack(side="left")
+                cb = wx.ComboBox(parent, value=f.default,
+                                 choices=f.choices or [], size=(160, -1))
+                row.Add(cb, 0, wx.ALL, 2)
+                var = _WidgetVar(cb)
+                cb.Bind(wx.EVT_COMBOBOX,
+                        lambda _e: self._update_command_preview())
+                cb.Bind(wx.EVT_TEXT,
+                        lambda _e: self._update_command_preview())
             else:
-                var = tk.StringVar(value=f.default)
-                ttk.Entry(row, textvariable=var, width=30).pack(side="left")
+                ctrl = wx.TextCtrl(parent, value=f.default, size=(220, -1))
+                row.Add(ctrl, 0, wx.ALL, 2)
+                var = _WidgetVar(ctrl)
+                ctrl.Bind(wx.EVT_TEXT,
+                          lambda _e: self._update_command_preview())
             if f.help:
-                ttk.Label(row, text=f.help, foreground="gray").pack(
-                    side="left", padx=8
-                )
+                hl = wx.StaticText(parent, label=f.help)
+                hl.SetForegroundColour(wx.Colour(128, 128, 128))
+                row.Add(hl, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+            sizer.Add(row, 0, wx.EXPAND)
             self.field_vars[step.id][f.key] = var
 
-        ttk.Label(parent, text="Additional parameters (free text):").pack(
-            anchor="w", pady=(10, 2)
+        sizer.Add(wx.StaticText(parent, label="Additional parameters (free text):"),
+                  0, wx.LEFT | wx.TOP, 6)
+        self.extra_params_ctrl = wx.TextCtrl(parent, value="", size=(560, -1))
+        self.extra_params_ctrl.Bind(
+            wx.EVT_TEXT, lambda _e: self._update_command_preview()
         )
-        self.extra_params_var = tk.StringVar(value="")
-        ttk.Entry(parent, textvariable=self.extra_params_var, width=80).pack(
-            anchor="w"
-        )
+        sizer.Add(self.extra_params_ctrl, 0, wx.LEFT | wx.BOTTOM, 6)
 
-        ttk.Label(parent, text="Command preview:", font=("", 10, "bold")).pack(
-            anchor="w", pady=(12, 2)
-        )
-        self.command_preview = ttk.Label(
-            parent, text="", wraplength=900, foreground="blue", justify="left"
-        )
-        self.command_preview.pack(anchor="w")
+        cph = wx.StaticText(parent, label="Command preview:")
+        cph.SetFont(cph.GetFont().Bold())
+        sizer.Add(cph, 0, wx.LEFT | wx.TOP, 6)
+        self.command_preview = wx.StaticText(parent, label="")
+        self.command_preview.SetForegroundColour(wx.BLUE)
+        sizer.Add(self.command_preview, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
-        for var in list(self.field_vars[step.id].values()) + self.input_vars[step.id]:
-            var.trace_add("write", lambda *_: self._update_command_preview())
-        self.extra_params_var.trace_add("write", lambda *_: self._update_command_preview())
-        if self.scale_cluster_var is not None:
-            self.scale_cluster_var.trace_add(
-                "write", lambda *_: self._update_command_preview()
-            )
-        # For correlation_matrix, toggling 'use scaled data' changes both
-        # the input files and which HTML/log files the Plots/Log tabs read.
+        # For correlation_matrix, toggling 'use scaled data' changes both the
+        # input files and which HTML/log files the Plots/Log tabs read.
         if step.id == "correlation_matrix":
             us = self.field_vars[step.id].get("use_scaled")
             if us is not None:
-                def _on_use_scaled(*_):
-                    # Update the Experiment/Reflection file fields to match:
-                    # scaled.* when ticked, symmetrized.* (the defaults) when
-                    # not. The fields remain editable if the user wants
-                    # something else.
+                def _on_use_scaled(_e):
                     exp_var, refl_var = self.input_vars["correlation_matrix"][:2]
                     if bool(us.get()):
                         exp_var.set("scaled.expt")
@@ -1845,95 +1924,102 @@ class DialsGUI(tk.Tk):
                         self._refresh_plots_from_text(
                             step, self._plot_source_text(step)
                         )
-                us.trace_add("write", _on_use_scaled)
+                us.ctrl.Bind(wx.EVT_CHECKBOX, _on_use_scaled)
 
-        btn_row = ttk.Frame(parent)
-        btn_row.pack(anchor="w", pady=12)
-        self.run_button = ttk.Button(
-            btn_row, text=f"Run {step.program}" + (" (optional)" if step.optional else ""),
-            command=lambda: self.run_step(step),
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.run_button = wx.Button(
+            parent,
+            label=f"Run {step.program}" + (" (optional)" if step.optional else ""),
         )
-        self.run_button.pack(side="left")
-        self.stop_button = ttk.Button(
-            btn_row, text="Stop", command=self.stop_running, state="disabled"
+        self.run_button.Bind(wx.EVT_BUTTON, lambda _e: self.run_step(step))
+        btn_row.Add(self.run_button, 0, wx.ALL, 2)
+        self.stop_button = wx.Button(parent, label="Stop")
+        self.stop_button.Enable(False)
+        self.stop_button.Bind(wx.EVT_BUTTON, lambda _e: self.stop_running())
+        btn_row.Add(self.stop_button, 0, wx.ALL, 2)
+        self.report_button = wx.Button(
+            parent, label="Run and show report in web browser"
         )
-        self.stop_button.pack(side="left", padx=6)
-        self.report_button = ttk.Button(
-            btn_row, text="Run and show report in web browser",
-            command=lambda: self.run_and_show_report(step),
+        self.report_button.Bind(
+            wx.EVT_BUTTON, lambda _e: self.run_and_show_report(step)
         )
-        self.report_button.pack(side="left", padx=6)
+        btn_row.Add(self.report_button, 0, wx.ALL, 2)
+        sizer.Add(btn_row, 0, wx.TOP, 8)
 
-        self.report_status_var = tk.StringVar(value="")
-        ttk.Label(
-            parent, textvariable=self.report_status_var, foreground="gray"
-        ).pack(anchor="w", pady=(2, 0))
+        self.report_status_label = wx.StaticText(parent, label="")
+        self.report_status_label.SetForegroundColour(wx.Colour(128, 128, 128))
+        sizer.Add(self.report_status_label, 0, wx.ALL, 4)
 
         self._update_command_preview()
 
-    def _build_import_inputs(self, parent, step: StepDef):
-        ttk.Label(parent, text="Image files / master file(s):").pack(anchor="w")
-        list_frame = ttk.Frame(parent)
-        list_frame.pack(fill="x", pady=2)
-        self.import_listbox = tk.Listbox(list_frame, height=5, width=90)
-        self.import_listbox.pack(side="left", fill="x", expand=True)
+    def _build_import_inputs(self, parent, sizer, step: StepDef):
+        sizer.Add(wx.StaticText(parent, label="Image files / master file(s):"),
+                  0, wx.LEFT | wx.TOP, 4)
+        self.import_listbox = wx.ListBox(parent, size=(-1, 100),
+                                         style=wx.LB_SINGLE)
         for f in self.image_files:
-            self.import_listbox.insert("end", f)
-        sb = ttk.Scrollbar(list_frame, command=self.import_listbox.yview)
-        sb.pack(side="left", fill="y")
-        self.import_listbox.config(yscrollcommand=sb.set)
+            self.import_listbox.Append(f)
+        sizer.Add(self.import_listbox, 0, wx.EXPAND | wx.ALL, 4)
 
-        btn_row = ttk.Frame(parent)
-        btn_row.pack(anchor="w", pady=2)
-        ttk.Button(btn_row, text="Browse files...", command=self._browse_images).pack(
-            side="left"
-        )
-        ttk.Button(
-            btn_row, text="Add glob pattern...", command=self._add_glob_pattern
-        ).pack(side="left", padx=4)
-        ttk.Button(btn_row, text="Clear", command=self._clear_images).pack(
-            side="left"
-        )
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        browse = wx.Button(parent, label="Browse files...")
+        browse.Bind(wx.EVT_BUTTON, lambda _e: self._browse_images())
+        btn_row.Add(browse, 0, wx.ALL, 2)
+        addglob = wx.Button(parent, label="Add glob pattern...")
+        addglob.Bind(wx.EVT_BUTTON, lambda _e: self._add_glob_pattern())
+        btn_row.Add(addglob, 0, wx.ALL, 2)
+        clear = wx.Button(parent, label="Clear")
+        clear.Bind(wx.EVT_BUTTON, lambda _e: self._clear_images())
+        btn_row.Add(clear, 0, wx.ALL, 2)
+        sizer.Add(btn_row, 0)
 
     def _browse_images(self):
-        files = filedialog.askopenfilenames(
-            initialdir=self.workdir.get(),
-            title="Select image / master files",
+        dlg = wx.FileDialog(
+            self, "Select image / master files",
+            defaultDir=self.workdir.get(),
+            style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
         )
-        for f in files:
-            self.image_files.append(f)
-            self.import_listbox.insert("end", f)
-        self._update_command_preview()
+        if dlg.ShowModal() == wx.ID_OK:
+            for f in dlg.GetPaths():
+                self.image_files.append(f)
+                if self.import_listbox is not None:
+                    self.import_listbox.Append(f)
+            self._update_command_preview()
+        dlg.Destroy()
 
     def _add_glob_pattern(self):
-        pattern = simpledialog.askstring(
-            "Glob pattern",
+        dlg = wx.TextEntryDialog(
+            self,
             "Enter a glob pattern (e.g. ../data/CIX*gz or ../data/ins10_?.nxs).\n"
             "The pattern is passed to dials.import as-is (not expanded here), "
             "so it's fine for it to match thousands of images:",
-            parent=self,
+            "Glob pattern",
         )
-        if not pattern:
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
             return
-        pattern = pattern.strip()
+        pattern = dlg.GetValue().strip()
+        dlg.Destroy()
         if not pattern:
             return
         # Pass the pattern through verbatim - dials.import does its own shell-
         # style expansion, and for large sweeps expanding here would put
-        # thousands of paths on the command line (and in the listbox). Just
-        # do a quick, non-authoritative count as a sanity hint to the user.
+        # thousands of paths on the command line (and in the listbox). Just do
+        # a quick, non-authoritative count as a sanity hint to the user.
         try:
             n = len(glob.glob(pattern))
         except Exception:
             n = None
         self.image_files.append(pattern)
         hint = "" if n is None else f"  [matches {n} file(s) now]"
-        self.import_listbox.insert("end", pattern + hint)
+        if self.import_listbox is not None:
+            self.import_listbox.Append(pattern + hint)
         self._update_command_preview()
 
     def _clear_images(self):
         self.image_files = []
-        self.import_listbox.delete(0, "end")
+        if self.import_listbox is not None:
+            self.import_listbox.Clear()
         self._update_command_preview()
 
     # ---------------------------------------------------- command build --
@@ -1945,7 +2031,7 @@ class DialsGUI(tk.Tk):
         cm_use_scaled = (
             step.id == "correlation_matrix"
             and bool(self.field_vars.get(step.id, {}).get("use_scaled",
-                                                           _FalseVar()).get())
+                                                          _FalseVar()).get())
         )
 
         if step.is_import:
@@ -1953,9 +2039,9 @@ class DialsGUI(tk.Tk):
         else:
             # The input fields are the single source of truth. For cluster
             # scaling the "Cluster to scale" selector has filled them with
-            # cluster_N.expt/.refl, and for correlation_matrix the "use
-            # scaled data" toggle has set them to scaled.expt/.refl - so we
-            # just read the fields here.
+            # cluster_N.expt/.refl, and for correlation_matrix the "use scaled
+            # data" toggle has set them to scaled.expt/.refl - so we just read
+            # the fields here.
             for var in self.input_vars[step.id]:
                 v = var.get().strip()
                 if v:
@@ -1968,9 +2054,8 @@ class DialsGUI(tk.Tk):
             if arg:
                 args.append(arg)
 
-        extra = getattr(self, "extra_params_var", None)
-        if extra is not None:
-            extra_text = extra.get().strip()
+        if self.extra_params_ctrl is not None:
+            extra_text = self.extra_params_ctrl.GetValue().strip()
             if extra_text:
                 args.extend(extra_text.split())
 
@@ -2009,61 +2094,72 @@ class DialsGUI(tk.Tk):
 
     def _update_command_preview(self):
         step = self.selected_step
-        if step is None or not hasattr(self, "command_preview"):
+        if step is None or self.command_preview is None:
             return
         try:
             cmd = self._build_command(step)
         except Exception:
             return
-        self.command_preview.config(text=" ".join(cmd))
+        self.command_preview.SetLabel(" ".join(cmd))
+        self.command_preview.Wrap(880)
+        parent = self.command_preview.GetParent()
+        if parent is not None:
+            parent.Layout()
 
     # -------------------------------------------------------- run step --
     def run_step(self, step: StepDef):
         if self.runner is not None and self.running_step_id is not None:
-            messagebox.showwarning(
-                "Busy", "Another step is currently running - please wait or stop it."
+            wx.MessageBox(
+                "Another step is currently running - please wait or stop it.",
+                "Busy", wx.OK | wx.ICON_WARNING,
             )
             return
 
         workdir = self.workdir.get()
         if not os.path.isdir(workdir):
-            messagebox.showerror("Invalid directory", f"{workdir} is not a directory")
+            wx.MessageBox(f"{workdir} is not a directory",
+                          "Invalid directory", wx.OK | wx.ICON_ERROR)
             return
 
         cmd = self._build_command(step)
         if step.is_import and not self.image_files:
-            messagebox.showerror(
-                "No input files", "Please add at least one image / master file."
-            )
+            wx.MessageBox("Please add at least one image / master file.",
+                          "No input files", wx.OK | wx.ICON_ERROR)
             return
 
         self._set_text(self.output_text, "")
         self._append_text(self.output_text, f"$ {' '.join(cmd)}\n\n")
         self._set_text(self.summary_text, "(running...)")
 
-        # Reset live-plot accumulation for this run and clear any stale
-        # figure so plots build up fresh as output streams in.
+        # Reset live-plot accumulation for this run and clear any stale figure
+        # so plots build up fresh as output streams in.
         self.live_output = ""
         self._poll_tick = 0
         if step.plot_kind and HAVE_MPL:
             self._refresh_plots_from_text(step, "")
 
         self.status[step.id] = "running"
-        self.step_buttons[step.id][1].config(text=STATUS_ICONS["running"])
-        self.run_button.config(state="disabled")
-        self.stop_button.config(state="normal")
+        self.step_buttons[step.id][1].SetLabel(STATUS_ICONS["running"])
+        if self.run_button is not None:
+            self.run_button.Enable(False)
+        if self.stop_button is not None:
+            self.stop_button.Enable(True)
 
         self.runner = ProcessRunner(cmd, workdir)
         self.running_step_id = step.id
+        self._running_step = step
         self.runner.start()
-        self.after(100, lambda: self._poll_runner(step))
+        # Poll the runner's queue via a repeating timer (~10 Hz).
+        self._timer.Start(100)
 
     def stop_running(self):
         if self.runner:
             self.runner.terminate()
 
-    def _poll_runner(self, step: StepDef):
-        if self.runner is None:
+    def _on_timer(self, _evt):
+        step = getattr(self, "_running_step", None)
+        if self.runner is None or step is None:
+            self._timer.Stop()
             return
         got_line = False
         try:
@@ -2074,9 +2170,10 @@ class DialsGUI(tk.Tk):
                     self.live_output += payload
                     got_line = True
                 elif kind == "done":
-                    # Flush a final plot update from everything streamed,
-                    # then fall through to _finish_step (which also
-                    # re-reads the on-disk log for the definitive version).
+                    # Flush a final plot update from everything streamed, then
+                    # fall through to _finish_step (which also re-reads the
+                    # on-disk log for the definitive version).
+                    self._timer.Stop()
                     if step.plot_kind and HAVE_MPL:
                         self._refresh_plots_from_text(step, self.live_output)
                     self._finish_step(step, payload)
@@ -2084,55 +2181,51 @@ class DialsGUI(tk.Tk):
         except queue.Empty:
             pass
 
-        # Live plot update, throttled: redraw roughly every ~0.75s worth of
-        # polls when new output has arrived, rather than on every single
-        # line (integration alone emits thousands of lines).
+        # Live plot update, throttled: redraw roughly every ~0.5s worth of
+        # polls when new output has arrived, rather than on every single line
+        # (integration alone emits thousands of lines).
         if got_line and step.plot_kind and HAVE_MPL:
             self._poll_tick += 1
             if self._poll_tick % 5 == 0:
                 self._refresh_plots_from_text(step, self.live_output)
 
-        self.after(150, lambda: self._poll_runner(step))
-
     def _finish_step(self, step: StepDef, returncode: int):
         ok = returncode == 0
         self.status[step.id] = "done" if ok else "failed"
-        self.step_buttons[step.id][1].config(
-            text=STATUS_ICONS["done" if ok else "failed"]
+        self.step_buttons[step.id][1].SetLabel(
+            STATUS_ICONS["done" if ok else "failed"]
         )
-        self.run_button.config(state="normal")
-        self.stop_button.config(state="disabled")
+        if self.run_button is not None:
+            self.run_button.Enable(True)
+        if self.stop_button is not None:
+            self.stop_button.Enable(False)
         self.runner = None
         self.running_step_id = None
-        # If a scale cluster run just finished, point the Plots "view
-        # cluster" page at it so the results are shown immediately (and the
-        # newly-written log is now on disk to build the page list from).
-        # Keep the Full Log tab on its current selection (default plain),
-        # but refresh that selector's choices so the new cluster is now
-        # pickable there too.
+        self._running_step = None
+        # If a scale cluster run just finished, point the Plots "view cluster"
+        # page at it so the results are shown immediately (and the newly-
+        # written log is now on disk to build the page list from). Keep the
+        # Full Log tab on its current selection (default plain), but refresh
+        # that selector's choices so the new cluster is now pickable there too.
         if step.id == "scale" and ok:
             run_cluster = self._selected_cluster()
-            if run_cluster is not None and self.plot_page_var is not None:
-                self.plot_page_var.set(f"cluster_{run_cluster}")
-            combo = getattr(self, "log_cluster_combo", None)
-            if combo is not None and self.log_cluster_var is not None:
+            if run_cluster is not None and self.plot_page_combo is not None:
+                self._select_plot_page(f"cluster_{run_cluster}")
+            combo = self.log_cluster_combo
+            if combo is not None:
                 choices = ["dials.scale.log (default)"] + [
                     f"cluster_{c}" for c in self._scale_result_clusters()
                 ]
-                combo["values"] = choices
-                if self.log_cluster_var.get() not in choices:
-                    self.log_cluster_var.set(choices[0])
+                cur = combo.GetValue()
+                combo.Set(choices)
+                combo.SetValue(cur if cur in choices else choices[0])
         self._refresh_log_tab(step)
-        # Definitive plot update from the on-disk log (the streamed
-        # stdout and the log file should agree, but the log is canonical;
-        # the "Summary vs image number" and merging-stats tables in
-        # particular are written at the very end).
+        # Definitive plot update from the on-disk log (the streamed stdout and
+        # the log file should agree, but the log is canonical; the "Summary vs
+        # image number" and merging-stats tables in particular are written at
+        # the very end).
         if step.plot_kind and HAVE_MPL:
             src = self._plot_source_text(step)
-            # For correlation_matrix the plots come only from the HTML
-            # (stdout has no graph JSON), so use src as-is; for the others
-            # prefer the canonical log but fall back to streamed stdout if
-            # the log hasn't been flushed yet.
             if step.plot_kind == "correlation_matrix":
                 self._refresh_plots_from_text(step, src)
             else:
@@ -2147,8 +2240,8 @@ class DialsGUI(tk.Tk):
     # ------------------------------------------------------- clusters --
     def _available_clusters(self) -> List[int]:
         """Scan the working directory for cluster_N.expt files (written by
-        dials.correlation_matrix significant_clusters.output=True) and
-        return the sorted list of cluster indices N."""
+        dials.correlation_matrix significant_clusters.output=True) and return
+        the sorted list of cluster indices N."""
         workdir = self.workdir.get()
         out = []
         try:
@@ -2164,18 +2257,18 @@ class DialsGUI(tk.Tk):
         """Return the cluster index currently chosen in the scale step's
         'Cluster to scale' selector (what to RUN next), or None if 'none' /
         not applicable."""
-        var = getattr(self, "scale_cluster_var", None)
-        if var is None:
+        combo = self.scale_cluster_combo
+        if combo is None:
             return None
-        val = var.get()
+        val = combo.GetValue()
         m = re.match(r"cluster_(\d+)$", val or "")
         return int(m.group(1)) if m else None
 
     def _scale_result_clusters(self) -> List[int]:
         """Cluster indices that already have a scale result on disk
-        (dials.scale.cluster_N.log). These are the clusters whose results
-        can be VIEWED in the Plots / Full Log tabs, independent of which
-        cluster is queued to run."""
+        (dials.scale.cluster_N.log). These are the clusters whose results can
+        be VIEWED in the Plots / Full Log tabs, independent of which cluster
+        is queued to run."""
         workdir = self.workdir.get()
         out = []
         try:
@@ -2189,10 +2282,10 @@ class DialsGUI(tk.Tk):
 
     def _scale_view_cluster(self) -> Optional[int]:
         """Which cluster's *results* the scale Plots/Log tabs should show,
-        taken from the Plots-tab page selector. 'plain' or 'all' -> None
-        (the non-cluster dials.scale.log). This is separate from
-        _selected_cluster (the run target) so you can review cluster 0's
-        results while cluster 1 is queued to run."""
+        taken from the Plots-tab page selector. 'plain' or 'all' -> None (the
+        non-cluster dials.scale.log). This is separate from _selected_cluster
+        (the run target) so you can review cluster 0's results while cluster 1
+        is queued to run."""
         page = self._current_plot_page()
         m = re.match(r"cluster_(\d+)$", page or "")
         return int(m.group(1)) if m else None
@@ -2200,19 +2293,16 @@ class DialsGUI(tk.Tk):
     def _scale_log_name(self) -> str:
         """The scale log filename to READ for the Plots / Full Log tabs.
 
-        Prefers the Plots-tab 'view cluster' selection (so completed
-        clusters can be reviewed while another is queued). Falls back to the
-        run-target cluster (useful mid-run before the page list is built),
-        then to the plain dials.scale.log."""
+        Prefers the Plots-tab 'view cluster' selection (so completed clusters
+        can be reviewed while another is queued). Falls back to the run-target
+        cluster (useful mid-run before the page list is built), then to the
+        plain dials.scale.log."""
         view = self._scale_view_cluster()
         if view is not None:
             return f"dials.scale.cluster_{view}.log"
-        # If viewing the "plain" page but a cluster is queued and currently
-        # running, show that cluster's log so live updates are visible.
         run = self._selected_cluster()
         page = self._current_plot_page()
         if run is not None and page in (None, "", "all", "plain"):
-            # only fall back to run target if there's no explicit plain view
             if page != "plain":
                 return f"dials.scale.cluster_{run}.log"
         return "dials.scale.log"
@@ -2221,9 +2311,9 @@ class DialsGUI(tk.Tk):
         """The scale log filename the FULL LOG tab should show, from its own
         'Log:' selector (default dials.scale.log). Independent of the Plots
         tab's cluster view."""
-        var = getattr(self, "log_cluster_var", None)
-        if var is not None:
-            m = re.match(r"cluster_(\d+)$", var.get() or "")
+        combo = self.log_cluster_combo
+        if combo is not None:
+            m = re.match(r"cluster_(\d+)$", combo.GetValue() or "")
             if m:
                 return f"dials.scale.cluster_{m.group(1)}.log"
         return "dials.scale.log"
@@ -2241,9 +2331,9 @@ class DialsGUI(tk.Tk):
 
     def _corrmat_html_text(self) -> str:
         """Read the correlation-matrix HTML from the working directory (the
-        source for the correlation_matrix Plots tab). If 'use scaled data'
-        is ticked, read the '.scaled.' variant this GUI writes for post-
-        scaling runs; otherwise the default. '' if absent."""
+        source for the correlation_matrix Plots tab). If 'use scaled data' is
+        ticked, read the '.scaled.' variant this GUI writes for post-scaling
+        runs; otherwise the default. '' if absent."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
             .get("use_scaled", _FalseVar()).get()
@@ -2252,26 +2342,19 @@ class DialsGUI(tk.Tk):
             "dials.correlation_matrix.scaled.html" if use_scaled
             else "dials.correlation_matrix.html"
         )
-        path = os.path.join(self.workdir.get(), name)
-        if not os.path.exists(path):
-            return ""
-        try:
-            with open(path, "r", errors="replace") as fh:
-                return fh.read()
-        except OSError:
-            return ""
+        return self._read_workdir_file(name)
 
     def _plot_source_text(self, step: StepDef) -> str:
         """The text a step's Plots tab should parse: the correlation_matrix
-        step plots from its HTML output (which carries the Plotly JSON
-        blobs), every other plot step from its .log file."""
+        step plots from its HTML output (which carries the Plotly JSON blobs),
+        every other plot step from its .log file."""
         if step.plot_kind == "correlation_matrix":
             return self._corrmat_html_text()
         return self._current_log_text(step)
 
     def _corrmat_log_name(self) -> str:
-        """The log filename dials.correlation_matrix writes given the
-        current 'use scaled data' selection."""
+        """The log filename dials.correlation_matrix writes given the current
+        'use scaled data' selection."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
             .get("use_scaled", _FalseVar()).get()
@@ -2281,8 +2364,8 @@ class DialsGUI(tk.Tk):
 
     def _current_log_text(self, step: StepDef) -> str:
         """Read back the on-disk log for this step (respecting the dynamic
-        merge/export log-name choice and cluster scaling). Returns '' if
-        not present."""
+        merge/export log-name choice and cluster scaling). Returns '' if not
+        present."""
         log_name = step.log_file
         if step.dynamic and step.id == "merge_export":
             mode = self.field_vars.get(step.id, {}).get("mode")
@@ -2294,14 +2377,7 @@ class DialsGUI(tk.Tk):
             log_name = self._corrmat_log_name()
         if not log_name:
             return ""
-        path = os.path.join(self.workdir.get(), log_name)
-        if not os.path.exists(path):
-            return ""
-        try:
-            with open(path, "r", errors="replace") as fh:
-                return fh.read()
-        except OSError:
-            return ""
+        return self._read_workdir_file(log_name)
 
     def _refresh_log_tab(self, step: StepDef):
         log_name = step.log_file
@@ -2311,8 +2387,7 @@ class DialsGUI(tk.Tk):
             log_name = "dials.export.log" if mode_val == "export" else "dials.merge.log"
         elif step.id == "scale":
             # The Full Log tab has its own 'Log:' selector (default
-            # dials.scale.log); it is independent of the Plots-tab cluster
-            # view.
+            # dials.scale.log); it is independent of the Plots-tab cluster view.
             log_name = self._scale_log_view_name()
         elif step.id == "correlation_matrix":
             log_name = self._corrmat_log_name()
@@ -2331,65 +2406,65 @@ class DialsGUI(tk.Tk):
         else:
             text = "(no fixed log filename for this step)"
 
-        self._set_text(self.log_text, text)
-        self._set_text(self.summary_text, summarise_log(text))
+        if self.log_text is not None:
+            self._set_text(self.log_text, text)
+        if self.summary_text is not None:
+            self._set_text(self.summary_text, summarise_log(text))
 
     # ------------------------------------------------------------ plots --
     def _build_plots_tab(self, parent, step: StepDef):
         """Build the Plots tab for a plot-capable step: an embedded
         matplotlib canvas (with the standard navigation toolbar), a status
-        line, an optional page selector (per data set for find_spots/
-        refine/integrate in multi-crystal mode, per cluster for scale), and
-        — for integration — a live block-processing progress bar."""
-        top = ttk.Frame(parent)
-        top.pack(fill="x")
+        line, an optional page selector (per data set for find_spots/refine/
+        integrate in multi-crystal mode, per cluster for scale), and — for
+        integration — a live block-processing progress bar."""
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        parent.SetSizer(sizer)
 
-        self.plot_status_var = tk.StringVar(
-            value="(no data yet - run this step, or plots will fill in "
-                  "live as it runs)"
+        top = wx.BoxSizer(wx.HORIZONTAL)
+        self.plot_status_label = wx.StaticText(
+            parent,
+            label=("(no data yet - run this step, or plots will fill in "
+                   "live as it runs)"),
         )
-        ttk.Label(top, textvariable=self.plot_status_var, foreground="gray").pack(
-            side="left", anchor="w"
-        )
+        self.plot_status_label.SetForegroundColour(wx.Colour(128, 128, 128))
+        top.Add(self.plot_status_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
         refresh_label = (
             "Refresh plots from HTML"
             if step.plot_kind == "correlation_matrix"
             else "Refresh plots from log"
         )
-        ttk.Button(
-            top, text=refresh_label,
-            command=lambda: self._refresh_plots_from_text(
+        refresh_btn = wx.Button(parent, label=refresh_label)
+        refresh_btn.Bind(
+            wx.EVT_BUTTON,
+            lambda _e: self._refresh_plots_from_text(
                 step, self._plot_source_text(step)
             ),
-        ).pack(side="right")
+        )
+        top.Add(refresh_btn, 0, wx.ALL, 2)
+        sizer.Add(top, 0, wx.EXPAND)
 
         # Page selector: for steps that can span multiple data sets or
-        # clusters, a combobox to flip between one page of plots each.
-        # Rebuilt/populated lazily as data arrives (see _update_plot_pages).
-        self.plot_page_var = None
+        # clusters, a combobox to flip between one page of plots each. Rebuilt/
+        # populated lazily as data arrives (see _update_plot_pages).
         self.plot_page_combo = None
         if step.plot_kind in ("find_spots", "refine", "integrate", "scale"):
-            page_frame = ttk.Frame(parent)
-            page_frame.pack(fill="x", pady=(4, 2))
+            page_row = wx.BoxSizer(wx.HORIZONTAL)
             label = "Cluster" if step.plot_kind == "scale" else "Data set"
-            ttk.Label(page_frame, text=f"{label}:", width=10).pack(side="left")
-            self.plot_page_var = tk.StringVar(value="all")
-            self.plot_page_combo = ttk.Combobox(
-                page_frame, textvariable=self.plot_page_var,
-                values=["all"], width=20, state="readonly",
+            page_row.Add(wx.StaticText(parent, label=f"{label}:", size=(70, -1)),
+                         0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            self.plot_page_combo = wx.ComboBox(
+                parent, choices=["all"], value="all",
+                style=wx.CB_READONLY, size=(180, -1),
             )
-            self.plot_page_combo.pack(side="left")
+            page_row.Add(self.plot_page_combo, 0, wx.ALL, 2)
 
             def _on_page_change(_e, s=step):
                 # Use the canonical source for the current page. For scale,
-                # _plot_scale reads the selected cluster's log itself (pass
-                # ""). For others, prefer the live stream only while THIS
-                # step is actively running; otherwise read the on-disk log,
-                # so reviewing a completed step (where self.live_output may
-                # be empty or from another step) still parses correctly.
-                # Using stale live_output was the cause of "pick a different
-                # run -> blank, selector jumps back": the parse yielded a
-                # different/empty set of runs so the chosen page vanished.
+                # _plot_scale reads the selected cluster's log itself (pass "").
+                # For others, prefer the live stream only while THIS step is
+                # actively running; otherwise read the on-disk log, so
+                # reviewing a completed step still parses correctly.
                 if s.plot_kind == "scale":
                     self._refresh_plots_from_text(s, "")
                     self._refresh_log_tab(s)
@@ -2398,60 +2473,65 @@ class DialsGUI(tk.Tk):
                     src = (self.live_output if running and self.live_output
                            else self._plot_source_text(s))
                     self._refresh_plots_from_text(s, src)
-            self.plot_page_combo.bind("<<ComboboxSelected>>", _on_page_change)
+            self.plot_page_combo.Bind(wx.EVT_COMBOBOX, _on_page_change)
 
             if step.plot_kind == "scale":
-                ttk.Label(
-                    page_frame,
-                    text="(pick a completed cluster to view its results)",
-                    foreground="gray",
-                ).pack(side="left", padx=8)
+                hint = wx.StaticText(
+                    parent, label="(pick a completed cluster to view its results)"
+                )
+                hint.SetForegroundColour(wx.Colour(128, 128, 128))
+                page_row.Add(hint, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+            sizer.Add(page_row, 0, wx.EXPAND | wx.TOP, 2)
 
         # Integration and multi-crystal indexing get a live progress bar.
         if step.plot_kind in ("integrate", "index"):
-            prog_frame = ttk.Frame(parent)
-            prog_frame.pack(fill="x", pady=(6, 2))
+            prog_row = wx.BoxSizer(wx.HORIZONTAL)
             initial = ("Blocks: waiting..." if step.plot_kind == "integrate"
                        else "Indexing: waiting...")
-            self.progress_var = tk.StringVar(value=initial)
-            ttk.Label(
-                prog_frame, textvariable=self.progress_var, width=40
-            ).pack(side="left")
-            self.progress_bar = ttk.Progressbar(
-                prog_frame, orient="horizontal", mode="determinate", length=400
-            )
-            self.progress_bar.pack(side="left", fill="x", expand=True, padx=6)
+            self.progress_label = wx.StaticText(parent, label=initial,
+                                                size=(280, -1))
+            prog_row.Add(self.progress_label, 0,
+                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            self.progress_bar = wx.Gauge(parent, range=100, size=(400, -1))
+            prog_row.Add(self.progress_bar, 1,
+                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 6)
+            sizer.Add(prog_row, 0, wx.EXPAND | wx.TOP, 4)
 
         self.plot_figure = Figure(figsize=(7.5, 5.0), dpi=100)
-        self.plot_canvas = FigureCanvasTkAgg(self.plot_figure, master=parent)
-        self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
-        toolbar = NavigationToolbar2Tk(self.plot_canvas, parent, pack_toolbar=False)
-        toolbar.update()
-        toolbar.pack(side="bottom", fill="x")
-        self.plot_canvas.draw_idle()
+        self.plot_canvas = FigureCanvas(parent, -1, self.plot_figure)
+        sizer.Add(self.plot_canvas, 1, wx.EXPAND | wx.ALL, 2)
+        toolbar = NavigationToolbar(self.plot_canvas)
+        toolbar.Realize()
+        sizer.Add(toolbar, 0, wx.EXPAND)
+        self.plot_canvas.draw()
 
     def _update_plot_pages(self, options: List[str]):
         """Refresh the page-selector combobox's choices, preserving the
         current selection if still valid. `options` is e.g. ['all','0',
-        '1',...]. No-op if there's no selector or the options are
-        unchanged."""
-        combo = getattr(self, "plot_page_combo", None)
-        var = getattr(self, "plot_page_var", None)
-        if combo is None or var is None:
+        '1',...]. No-op if there's no selector or the options are unchanged."""
+        combo = self.plot_page_combo
+        if combo is None:
             return
-        if list(combo["values"]) == options:
+        if list(combo.GetStrings()) == options:
             return
-        combo["values"] = options
-        if var.get() not in options:
-            var.set(options[0] if options else "all")
+        cur = combo.GetValue()
+        combo.Set(options)
+        combo.SetValue(cur if cur in options else (options[0] if options else "all"))
+
+    def _select_plot_page(self, value: str):
+        combo = self.plot_page_combo
+        if combo is None:
+            return
+        if value in combo.GetStrings():
+            combo.SetValue(value)
 
     def _current_plot_page(self) -> str:
-        var = getattr(self, "plot_page_var", None)
-        return var.get() if var is not None else "all"
+        combo = self.plot_page_combo
+        return combo.GetValue() if combo is not None else "all"
 
     def _refresh_plots_from_text(self, step: StepDef, text: str):
-        """Re-parse `text` for this step and redraw the figure. Safe to
-        call repeatedly (live) and with partial/empty text. Dispatches on
+        """Re-parse `text` for this step and redraw the figure. Safe to call
+        repeatedly (live) and with partial/empty text. Dispatches on
         step.plot_kind."""
         if not HAVE_MPL or self.plot_figure is None or self.plot_canvas is None:
             return
@@ -2473,14 +2553,25 @@ class DialsGUI(tk.Tk):
             elif kind == "correlation_matrix":
                 self._plot_correlation_matrix(text)
         except Exception as exc:  # pragma: no cover - defensive redraw guard
-            if self.plot_status_var is not None:
-                self.plot_status_var.set(f"(plot error: {exc})")
+            self._set_plot_status(f"(plot error: {exc})")
             return
         self.plot_canvas.draw_idle()
 
     def _set_plot_status(self, msg: str):
-        if self.plot_status_var is not None:
-            self.plot_status_var.set(msg)
+        if self.plot_status_label is not None:
+            self.plot_status_label.SetLabel(msg)
+            self.plot_status_label.Wrap(700)
+            parent = self.plot_status_label.GetParent()
+            if parent is not None:
+                parent.Layout()
+
+    def _set_progress(self, fraction: Optional[float], label: str):
+        """Update the wx.Gauge (0..100) and its label. fraction None -> 0."""
+        if self.progress_bar is not None:
+            val = 0 if fraction is None else int(max(0.0, min(1.0, fraction)) * 100)
+            self.progress_bar.SetValue(val)
+        if self.progress_label is not None:
+            self.progress_label.SetLabel(label)
 
     def _plot_index(self, text: str):
         """Index step: for multi-crystal indexing (joint=false) DIALS prints
@@ -2490,18 +2581,18 @@ class DialsGUI(tk.Tk):
         short explanatory note; the progress bar is the real content."""
         prog = parse_index_progress(text)
 
-        if self.progress_bar is not None and self.progress_var is not None:
+        if self.progress_bar is not None and self.progress_label is not None:
             if prog is not None and prog["total"] > 0:
-                self.progress_bar.config(maximum=prog["total"], value=prog["done"])
-                self.progress_var.set(
+                self._set_progress(
+                    prog["done"] / prog["total"],
                     f"Indexing imageset {prog['imageset_id']} "
-                    f"({prog['done']}/{prog['total']})"
+                    f"({prog['done']}/{prog['total']})",
                 )
             else:
-                self.progress_bar.config(value=0)
-                self.progress_var.set(
+                self._set_progress(
+                    0,
                     "Indexing: waiting... (per-imageset progress appears for "
-                    "multi-crystal joint=false runs)"
+                    "multi-crystal joint=false runs)",
                 )
 
         fig = self.plot_figure
@@ -2675,7 +2766,7 @@ class DialsGUI(tk.Tk):
         progress = parse_integrate_progress(text)
 
         # --- live progress bar (block processing) ---
-        if self.progress_bar is not None and self.progress_var is not None:
+        if self.progress_bar is not None and self.progress_label is not None:
             n_blocks = len(blocks)
             if n_blocks:
                 # The block loop runs twice (profile modelling, then
@@ -2684,17 +2775,15 @@ class DialsGUI(tk.Tk):
                 pass_no = 1 if done <= n_blocks else 2
                 in_pass = done if done <= n_blocks else done - n_blocks
                 in_pass = min(in_pass, n_blocks)
-                self.progress_bar.config(maximum=n_blocks, value=in_pass)
                 label = (
                     f"Pass {pass_no}/2 - block {in_pass}/{n_blocks}"
                     if done else f"Blocks: 0/{n_blocks}"
                 )
                 if progress["last_to"]:
                     label += f"  (frames {progress['last_from']} -> {progress['last_to']})"
-                self.progress_var.set(label)
+                self._set_progress(in_pass / n_blocks, label)
             else:
-                self.progress_bar.config(value=0)
-                self.progress_var.set("Blocks: waiting for block table...")
+                self._set_progress(0, "Blocks: waiting for block table...")
 
         # --- end-of-integration line graphs (Summary vs image number) ---
         fig = self.plot_figure
@@ -3011,15 +3100,15 @@ class DialsGUI(tk.Tk):
         )
         fig.tight_layout()
 
+
     # --------------------------------------------------------- dials.report --
     def _report_files_for_step(self, step: StepDef) -> List[str]:
-        """Work out which .expt/.refl files best represent the result of
-        this stage, to hand to `dials.report`. Prefers the stage's own
-        freshly-written outputs; falls back to pairing a single new
-        output with the other file type from the current input fields;
-        falls back again to the step's current inputs for stages (like
-        Bravais lattice determination or Merge/Export) that don't
-        themselves write a fresh .expt/.refl pair."""
+        """Work out which .expt/.refl files best represent the result of this
+        stage, to hand to `dials.report`. Prefers the stage's own freshly-
+        written outputs; falls back to pairing a single new output with the
+        other file type from the current input fields; falls back again to the
+        step's current inputs for stages (like Bravais lattice determination or
+        Merge/Export) that don't themselves write a fresh .expt/.refl pair."""
 
         expt_out = next((o for o in step.outputs if o.endswith(".expt")), None)
         refl_out = next((o for o in step.outputs if o.endswith(".refl")), None)
@@ -3043,26 +3132,26 @@ class DialsGUI(tk.Tk):
     def run_and_show_report(self, step: StepDef):
         workdir = self.workdir.get()
         if not os.path.isdir(workdir):
-            messagebox.showerror("Invalid directory", f"{workdir} is not a directory")
+            wx.MessageBox(f"{workdir} is not a directory",
+                          "Invalid directory", wx.OK | wx.ICON_ERROR)
             return
         if shutil.which("dials.report") is None:
-            messagebox.showerror(
-                "Not found", "dials.report was not found on $PATH."
-            )
+            wx.MessageBox("dials.report was not found on $PATH.",
+                          "Not found", wx.OK | wx.ICON_ERROR)
             return
 
         files = self._report_files_for_step(step)
         if not files:
-            messagebox.showwarning(
-                "No files",
+            wx.MessageBox(
                 "No experiment/reflection files are set for this step yet - "
                 "fill in the input fields above (or run the step first).",
+                "No files", wx.OK | wx.ICON_WARNING,
             )
             return
 
         cmd = ["dials.report"] + files
-        self.report_button.config(state="disabled")
-        self.report_status_var.set(f"Running: {' '.join(cmd)} ...")
+        self.report_button.Enable(False)
+        self.report_status_label.SetLabel(f"Running: {' '.join(cmd)} ...")
 
         def worker():
             try:
@@ -3070,32 +3159,38 @@ class DialsGUI(tk.Tk):
                     cmd, cwd=workdir, capture_output=True, text=True
                 )
             except Exception as exc:
-                self.after(0, lambda: self._report_finished(
-                    step, False, f"Could not launch dials.report: {exc}"
-                ))
+                wx.CallAfter(self._report_finished, step, False,
+                             f"Could not launch dials.report: {exc}")
                 return
 
             html_path = os.path.join(workdir, "dials.report.html")
             if result.returncode != 0 or not os.path.exists(html_path):
                 tail = (result.stdout or "")[-1500:] + "\n" + (result.stderr or "")[-1500:]
-                self.after(0, lambda: self._report_finished(
-                    step, False,
+                wx.CallAfter(
+                    self._report_finished, step, False,
                     f"dials.report exited with code {result.returncode}:\n{tail}",
-                ))
+                )
                 return
 
-            self.after(0, lambda: self._report_finished(step, True, html_path))
+            wx.CallAfter(self._report_finished, step, True, html_path)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _report_finished(self, step: StepDef, ok: bool, detail: str):
-        self.report_button.config(state="normal")
+        if self.report_button is not None:
+            self.report_button.Enable(True)
         if ok:
-            self.report_status_var.set(f"Opened {detail} in your web browser.")
+            if self.report_status_label is not None:
+                self.report_status_label.SetLabel(
+                    f"Opened {detail} in your web browser."
+                )
             webbrowser.open(f"file://{detail}")
         else:
-            self.report_status_var.set("dials.report failed - see error dialog.")
-            messagebox.showerror("dials.report failed", detail)
+            if self.report_status_label is not None:
+                self.report_status_label.SetLabel(
+                    "dials.report failed - see error dialog."
+                )
+            wx.MessageBox(detail, "dials.report failed", wx.OK | wx.ICON_ERROR)
 
     # ------------------------------------------------------------ tools --
     def launch_tool(self, program: str, arg_labels: List[str]):
@@ -3109,54 +3204,58 @@ class DialsGUI(tk.Tk):
         while len(defaults) < len(arg_labels):
             defaults.append("")
 
-        dialog = tk.Toplevel(self)
-        dialog.title(f"Launch {program}")
-        vars_ = []
+        dialog = wx.Dialog(self, title=f"Launch {program}", size=(560, -1))
+        dsizer = wx.BoxSizer(wx.VERTICAL)
+        ctrls = []
         for label, default in zip(arg_labels, defaults):
-            row = ttk.Frame(dialog, padding=4)
-            row.pack(fill="x")
-            ttk.Label(row, text=label, width=28).pack(side="left")
-            v = tk.StringVar(value=default)
-            ttk.Entry(row, textvariable=v, width=50).pack(side="left")
-            vars_.append(v)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            row.Add(wx.StaticText(dialog, label=label, size=(220, -1)),
+                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+            ctrl = wx.TextCtrl(dialog, value=default, size=(300, -1))
+            row.Add(ctrl, 1, wx.ALL, 4)
+            dsizer.Add(row, 0, wx.EXPAND)
+            ctrls.append(ctrl)
 
-        def do_launch():
-            args = [v.get().strip() for v in vars_ if v.get().strip()]
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        launch_btn = wx.Button(dialog, wx.ID_OK, label="Launch")
+        cancel_btn = wx.Button(dialog, wx.ID_CANCEL, label="Cancel")
+        btn_row.Add(launch_btn, 0, wx.ALL, 4)
+        btn_row.Add(cancel_btn, 0, wx.ALL, 4)
+        dsizer.Add(btn_row, 0, wx.ALIGN_LEFT)
+        dialog.SetSizerAndFit(dsizer)
+
+        if dialog.ShowModal() == wx.ID_OK:
+            args = [c.GetValue().strip() for c in ctrls if c.GetValue().strip()]
             cmd = [program] + args
             workdir = self.workdir.get()
             if shutil.which(program) is None:
-                messagebox.showerror(
-                    "Not found", f"{program} was not found on $PATH."
-                )
+                wx.MessageBox(f"{program} was not found on $PATH.",
+                              "Not found", wx.OK | wx.ICON_ERROR)
+                dialog.Destroy()
                 return
             try:
                 subprocess.Popen(cmd, cwd=workdir)
             except Exception as exc:
-                messagebox.showerror("Error launching tool", str(exc))
+                wx.MessageBox(str(exc), "Error launching tool",
+                              wx.OK | wx.ICON_ERROR)
+                dialog.Destroy()
                 return
             if program == "dials.report":
-                # dials.report writes dials.report.html into the cwd;
-                # give it a moment then try to open it in a browser.
+                # dials.report writes dials.report.html into the cwd; give it
+                # a moment then try to open it in a browser.
                 def _open_report():
                     html_path = os.path.join(workdir, "dials.report.html")
                     if os.path.exists(html_path):
                         webbrowser.open(f"file://{html_path}")
-                self.after(4000, _open_report)
-            dialog.destroy()
-
-        btn_row = ttk.Frame(dialog, padding=6)
-        btn_row.pack(fill="x")
-        ttk.Button(btn_row, text="Launch", command=do_launch).pack(side="left")
-        ttk.Button(btn_row, text="Cancel", command=dialog.destroy).pack(
-            side="left", padx=4
-        )
+                wx.CallLater(4000, _open_report)
+        dialog.Destroy()
 
 
 def main():
-    if sys.platform.startswith("win"):
-        pass  # no special handling needed currently
-    app = DialsGUI()
-    app.mainloop()
+    app = wx.App(False)
+    frame = DialsFrame()
+    frame.Show()
+    app.MainLoop()
 
 
 if __name__ == "__main__":
