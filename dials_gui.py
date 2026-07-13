@@ -56,7 +56,9 @@ Run with:
 
 from __future__ import annotations
 
+import base64
 import glob
+import io
 import json
 import math
 import os
@@ -79,6 +81,7 @@ import wx
 # Plots tab" rather than failing to start.
 try:
     import matplotlib
+
     matplotlib.use("WXAgg")
     from matplotlib.backends.backend_wxagg import (
         FigureCanvasWxAgg as FigureCanvas,
@@ -87,9 +90,181 @@ try:
         NavigationToolbar2WxAgg as NavigationToolbar,
     )
     from matplotlib.figure import Figure
+
     HAVE_MPL = True
 except Exception:  # pragma: no cover - depends on environment
     HAVE_MPL = False
+
+
+# --------------------------------------------------------------------------
+# Application / taskbar icon
+#
+# Embedded as base64-encoded PNG data so the GUI is a single self-contained
+# file with no external icon asset to lose track of. Decoded lazily (once)
+# into a wx.Icon the first time a frame asks for it.
+# --------------------------------------------------------------------------
+
+APP_ICON_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAGwAAABrCAYAAACSY2d1AAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQA"
+    "APoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAAhGVYSWZNTQAqAAAACAAFARIAAwAAAAEAAQAAARoABQAAAAEA"
+    "AABKARsABQAAAAEAAABSASgAAwAAAAEAAgAAh2kABAAAAAEAAABaAAAAAAAAAJYAAAABAAAAlgAAAAEAA6ABAAMA"
+    "AAABAAEAAKACAAQAAAABAAAAbKADAAQAAAABAAAAawAAAAA5rXDkAAAACXBIWXMAABcSAAAXEgFnn9JSAAABWWlU"
+    "WHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0"
+    "az0iWE1QIENvcmUgNi4wLjAiPgogICA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkv"
+    "MDIvMjItcmRmLXN5bnRheC1ucyMiPgogICAgICA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIgogICAgICAg"
+    "ICAgICB4bWxuczp0aWZmPSJodHRwOi8vbnMuYWRvYmUuY29tL3RpZmYvMS4wLyI+CiAgICAgICAgIDx0aWZmOk9y"
+    "aWVudGF0aW9uPjE8L3RpZmY6T3JpZW50YXRpb24+CiAgICAgIDwvcmRmOkRlc2NyaXB0aW9uPgogICA8L3JkZjpS"
+    "REY+CjwveDp4bXBtZXRhPgoZXuEHAAAiSElEQVR4AdVdaYxk11U+r+rV2lW9Ts/usWe8jMdLbBNjRyGYiACyQAoS"
+    "RPwjEj/4g4AfSPxA8AMk+MMfFJGIPyCCUIQCIggJCYEVoQSSOBln4vEae+LZPXtPT3d1Vdf++L7z3qt+VfWW+6qX"
+    "qbnq6np1313Puefcc88991zrqS/+ueOII37o49fGxqbcvHFH+lvRYiHeD3zyP5lMRo4cXpZCIe+/Nv52vDIzliWC"
+    "j//buID7mLDT7cmtW3dls7GpbTdtip3Nyv79i1IuFyOzEA53V9dlFZ/RYPsRigAk7AFLtVpjDFk+gpiez8GQBtDE"
+    "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"
+)
+
+
+_app_icon_cache: Optional["wx.Icon"] = None
+
+
+def get_app_icon() -> "wx.Icon":
+    """Return the application icon, decoding the embedded PNG on first use."""
+    global _app_icon_cache
+    if _app_icon_cache is None:
+        png_bytes = base64.b64decode(APP_ICON_PNG_BASE64)
+        image = wx.Image(io.BytesIO(png_bytes), wx.BITMAP_TYPE_PNG)
+        bitmap = wx.Bitmap(image)
+        icon = wx.Icon()
+        icon.CopyFromBitmap(bitmap)
+        _app_icon_cache = icon
+    return _app_icon_cache
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +278,7 @@ class ExtraField:
 
     key: str
     label: str
-    kind: str = "entry"          # "entry", "check", "combo"
+    kind: str = "entry"  # "entry", "check", "combo"
     default: str = ""
     choices: Optional[List[str]] = None
     help: str = ""
@@ -165,8 +340,12 @@ STEPS: List[StepDef] = [
         inputs=[],
         is_import=True,
         extra_fields=[
-            ExtraField("image_range", "Image range (start,end)", "entry",
-                       help="e.g. 1,1200 - leave blank to use all images"),
+            ExtraField(
+                "image_range",
+                "Image range (start,end)",
+                "entry",
+                help="e.g. 1,1200 - leave blank to use all images",
+            ),
         ],
         outputs=["imported.expt"],
         log_file="dials.import.log",
@@ -226,15 +405,24 @@ STEPS: List[StepDef] = [
             InputSpec("Reflection file", "strong.refl"),
         ],
         extra_fields=[
-            ExtraField("joint", "multi-crystal (joint=false)", "check",
-                       check_value="false",
-                       help="index many crystals independently in one run"),
+            ExtraField(
+                "joint",
+                "multi-crystal (joint=false)",
+                "check",
+                check_value="false",
+                help="index many crystals independently in one run",
+            ),
             ExtraField("space_group", "space_group", "entry"),
-            ExtraField("unit_cell", "unit_cell", "entry",
-                       help="e.g. 78,78,78,90,90,90"),
-            ExtraField("max_lattices", "max_lattices", "entry",
-                       help="set to 2 (say) if % indexed is low and a "
-                            "second lattice is suspected"),
+            ExtraField(
+                "unit_cell", "unit_cell", "entry", help="e.g. 78,78,78,90,90,90"
+            ),
+            ExtraField(
+                "max_lattices",
+                "max_lattices",
+                "entry",
+                help="set to 2 (say) if % indexed is low and a "
+                "second lattice is suspected",
+            ),
         ],
         outputs=["indexed.expt", "indexed.refl"],
         log_file="dials.index.log",
@@ -295,8 +483,12 @@ STEPS: List[StepDef] = [
             InputSpec("Reflection file", "refined.refl"),
         ],
         extra_fields=[
-            ExtraField("prediction.d_min", "prediction.d_min", "entry",
-                       help="optional resolution limit, e.g. 1.8"),
+            ExtraField(
+                "prediction.d_min",
+                "prediction.d_min",
+                "entry",
+                help="optional resolution limit, e.g. 1.8",
+            ),
             ExtraField("nproc", "nproc (blank = all cores)", "entry"),
         ],
         outputs=["integrated.expt", "integrated.refl"],
@@ -366,14 +558,20 @@ STEPS: List[StepDef] = [
             InputSpec("Reflection file", "symmetrized.refl"),
         ],
         extra_fields=[
-            ExtraField("use_scaled", "use scaled data (run after scaling)",
-                       "check",
-                       help="switch inputs to scaled.expt/.refl and write to "
-                            "dials.correlation_matrix.scaled.html"),
-            ExtraField("significant_clusters.output",
-                       "output clusters (write cluster_N.expt/.refl)",
-                       "check", default="True",
-                       help="on by default; needed to scale clusters separately"),
+            ExtraField(
+                "use_scaled",
+                "use scaled data (run after scaling)",
+                "check",
+                help="switch inputs to scaled.expt/.refl and write to "
+                "dials.correlation_matrix.scaled.html",
+            ),
+            ExtraField(
+                "significant_clusters.output",
+                "output clusters (write cluster_N.expt/.refl)",
+                "check",
+                default="True",
+                help="on by default; needed to scale clusters separately",
+            ),
         ],
         outputs=[],
         log_file="dials.correlation_matrix.log",
@@ -402,11 +600,19 @@ STEPS: List[StepDef] = [
         ],
         extra_fields=[
             ExtraField("anomalous", "anomalous", "check"),
-            ExtraField("absorption_level", "absorption_level", "combo",
-                       choices=["", "low", "medium", "high"],
-                       help="low (~1%, default), medium (~5%), high (~25%)"),
-            ExtraField("d_min", "d_min", "entry",
-                       help="optional resolution cutoff from CC-half fit"),
+            ExtraField(
+                "absorption_level",
+                "absorption_level",
+                "combo",
+                choices=["", "low", "medium", "high"],
+                help="low (~1%, default), medium (~5%), high (~25%)",
+            ),
+            ExtraField(
+                "d_min",
+                "d_min",
+                "entry",
+                help="optional resolution cutoff from CC-half fit",
+            ),
         ],
         outputs=["scaled.expt", "scaled.refl", "dials.scale.html"],
         log_file="dials.scale.log",
@@ -427,10 +633,15 @@ STEPS: List[StepDef] = [
             InputSpec("Reflection file", "scaled.refl"),
         ],
         extra_fields=[
-            ExtraField("mode", "mode", "combo", default="merge",
-                       choices=["merge", "export"]),
-            ExtraField("d_min", "d_min", "entry",
-                       help="optional resolution cutoff suggested by scaling"),
+            ExtraField(
+                "mode", "mode", "combo", default="merge", choices=["merge", "export"]
+            ),
+            ExtraField(
+                "d_min",
+                "d_min",
+                "entry",
+                help="optional resolution cutoff suggested by scaling",
+            ),
         ],
         outputs=[],
         log_file="",
@@ -441,10 +652,16 @@ STEPS: List[StepDef] = [
 
 TOOLS = [
     ("dials.show", "dials.show", ["Experiment / reflection file(s)"]),
-    ("dials.image_viewer", "dials.image_viewer",
-     ["Experiment file", "Reflection file (optional)"]),
-    ("dials.reciprocal_lattice_viewer", "dials.reciprocal_lattice_viewer",
-     ["Experiment file", "Reflection file"]),
+    (
+        "dials.image_viewer",
+        "dials.image_viewer",
+        ["Experiment file", "Reflection file (optional)"],
+    ),
+    (
+        "dials.reciprocal_lattice_viewer",
+        "dials.reciprocal_lattice_viewer",
+        ["Experiment file", "Reflection file"],
+    ),
     ("dials.report", "dials.report", ["Experiment file", "Reflection file"]),
 ]
 
@@ -484,9 +701,12 @@ def summarise_log(text: str, max_blocks: int = 8) -> str:
             block = []
             # walk backwards to include a header line above a leading '+--' row
             j = i
-            while j > 0 and lines[j - 1].strip() and not _TABLE_LINE.match(
-                lines[j - 1]
-            ) and len(block) < 1:
+            while (
+                j > 0
+                and lines[j - 1].strip()
+                and not _TABLE_LINE.match(lines[j - 1])
+                and len(block) < 1
+            ):
                 j -= 1
             start = max(i - 2, 0)
             k = i
@@ -607,8 +827,8 @@ def parse_find_spots_by_imageset(text: str) -> List[Dict[str, object]]:
         if m:
             if current is None:
                 current = _new(None)
-            current["image"].append(float(m.group(2)))    # type: ignore[union-attr]
-            current["pixels"].append(float(m.group(1)))   # type: ignore[union-attr]
+            current["image"].append(float(m.group(2)))  # type: ignore[union-attr]
+            current["pixels"].append(float(m.group(1)))  # type: ignore[union-attr]
 
     # Drop any empty banner-only series (e.g. a banner seen but no spot
     # lines yet is fine to keep; but a trailing empty one adds nothing).
@@ -635,7 +855,7 @@ def parse_refine_steps(text: str) -> Dict[str, List[float]]:
     if header_idx is None:
         return {"step": [], "rmsd_x": [], "rmsd_y": [], "rmsd_phi": []}
 
-    for line in lines[header_idx + 1:]:
+    for line in lines[header_idx + 1 :]:
         cells = _split_table_row(line)
         if cells is None:
             if steps and not line.strip():
@@ -664,7 +884,9 @@ _REFINE_GROUP_RE = re.compile(
 )
 
 
-def _parse_one_refine_table(lines: List[str], start: int) -> Tuple[Dict[str, List[float]], int]:
+def _parse_one_refine_table(
+    lines: List[str], start: int
+) -> Tuple[Dict[str, List[float]], int]:
     """Parse a single 'Refinement steps' table whose header is at/after
     `start`. Returns (table_dict, index_after_table). table_dict is empty
     if no data rows were found."""
@@ -722,9 +944,12 @@ def parse_all_refine_steps(text: str) -> List[Dict[str, List[float]]]:
     n = len(lines)
 
     # Find the group-marker positions.
-    markers = [(i, m.group(1).strip())
-               for i, line in enumerate(lines)
-               for m in [_REFINE_GROUP_RE.search(line)] if m]
+    markers = [
+        (i, m.group(1).strip())
+        for i, line in enumerate(lines)
+        for m in [_REFINE_GROUP_RE.search(line)]
+        if m
+    ]
 
     tables: List[Dict[str, List[float]]] = []
 
@@ -847,8 +1072,18 @@ def parse_index_progress(text: str) -> Optional[Dict[str, int]]:
 
 _SUMMARY_VS_IMAGE_RE = re.compile(r"Summary vs image number", re.IGNORECASE)
 _INTEGRATE_SUMMARY_KEYS = [
-    "image", "n_full", "n_part", "n_over", "n_ice", "n_sum",
-    "n_prf", "ibg", "isigi_sum", "isigi_prf", "cc_prf", "rmsd_xy",
+    "image",
+    "n_full",
+    "n_part",
+    "n_over",
+    "n_ice",
+    "n_sum",
+    "n_prf",
+    "ibg",
+    "isigi_sum",
+    "isigi_prf",
+    "cc_prf",
+    "rmsd_xy",
 ]
 
 
@@ -865,7 +1100,7 @@ def parse_integrate_summary(text: str) -> Dict[str, List[float]]:
         return result
 
     started = False
-    for line in lines[header_idx + 1:]:
+    for line in lines[header_idx + 1 :]:
         cells = _split_table_row(line)
         if cells is None:
             if started and not line.strip():
@@ -875,18 +1110,18 @@ def parse_integrate_summary(text: str) -> Dict[str, List[float]]:
             continue
         try:
             vals = [
-                float(int(cells[1])),   # image
-                float(int(cells[2])),   # n_full
-                float(int(cells[3])),   # n_part
-                float(int(cells[4])),   # n_over
-                float(int(cells[5])),   # n_ice
-                float(int(cells[6])),   # n_sum
-                float(int(cells[7])),   # n_prf
-                float(cells[8]),        # ibg
-                float(cells[9]),        # isigi_sum
-                float(cells[10]),       # isigi_prf
-                float(cells[11]),       # cc_prf
-                float(cells[12]),       # rmsd_xy
+                float(int(cells[1])),  # image
+                float(int(cells[2])),  # n_full
+                float(int(cells[3])),  # n_part
+                float(int(cells[4])),  # n_over
+                float(int(cells[5])),  # n_ice
+                float(int(cells[6])),  # n_sum
+                float(int(cells[7])),  # n_prf
+                float(cells[8]),  # ibg
+                float(cells[9]),  # isigi_sum
+                float(cells[10]),  # isigi_prf
+                float(cells[11]),  # cc_prf
+                float(cells[12]),  # rmsd_xy
             ]
         except (ValueError, IndexError):
             continue
@@ -897,13 +1132,21 @@ def parse_integrate_summary(text: str) -> Dict[str, List[float]]:
     return result
 
 
-_MERGING_HEADER_RE = re.compile(
-    r"Merging statistics by resolution bin", re.IGNORECASE
-)
+_MERGING_HEADER_RE = re.compile(r"Merging statistics by resolution bin", re.IGNORECASE)
 _MERGING_KEYS = [
-    "d_max", "d_min", "inv_d2", "mult", "completeness", "i_mean",
-    "i_over_sigma", "r_merge", "r_meas", "r_pim", "r_anom",
-    "cc_half", "cc_anom",
+    "d_max",
+    "d_min",
+    "inv_d2",
+    "mult",
+    "completeness",
+    "i_mean",
+    "i_over_sigma",
+    "r_merge",
+    "r_meas",
+    "r_pim",
+    "r_anom",
+    "cc_half",
+    "cc_anom",
 ]
 
 
@@ -939,7 +1182,7 @@ def parse_scale_merging(text: str) -> Dict[str, object]:
 
     rows: List[List[float]] = []
     started = False
-    for line in lines[header_idx + 1:]:
+    for line in lines[header_idx + 1 :]:
         stripped = line.strip()
         if not stripped:
             if started:
@@ -976,22 +1219,36 @@ def parse_scale_merging(text: str) -> Dict[str, object]:
             per_bin_rows = others
 
     for r in per_bin_rows:
-        (d_max, d_min, _nobs, _nuniq, mult, comp, i_mean, i_sig,
-         r_mrg, r_meas, r_pim, r_anom, cc12, ccano) = r
+        (
+            d_max,
+            d_min,
+            _nobs,
+            _nuniq,
+            mult,
+            comp,
+            i_mean,
+            i_sig,
+            r_mrg,
+            r_meas,
+            r_pim,
+            r_anom,
+            cc12,
+            ccano,
+        ) = r
         d_geo = math.sqrt(d_min * d_max)
-        result["d_max"].append(d_max)          # type: ignore[union-attr]
-        result["d_min"].append(d_min)          # type: ignore[union-attr]
+        result["d_max"].append(d_max)  # type: ignore[union-attr]
+        result["d_min"].append(d_min)  # type: ignore[union-attr]
         result["inv_d2"].append(1.0 / (d_geo * d_geo))  # type: ignore[union-attr]
-        result["mult"].append(mult)            # type: ignore[union-attr]
-        result["completeness"].append(comp)    # type: ignore[union-attr]
-        result["i_mean"].append(i_mean)        # type: ignore[union-attr]
-        result["i_over_sigma"].append(i_sig)   # type: ignore[union-attr]
-        result["r_merge"].append(r_mrg)        # type: ignore[union-attr]
-        result["r_meas"].append(r_meas)        # type: ignore[union-attr]
-        result["r_pim"].append(r_pim)          # type: ignore[union-attr]
-        result["r_anom"].append(r_anom)        # type: ignore[union-attr]
-        result["cc_half"].append(cc12)         # type: ignore[union-attr]
-        result["cc_anom"].append(ccano)        # type: ignore[union-attr]
+        result["mult"].append(mult)  # type: ignore[union-attr]
+        result["completeness"].append(comp)  # type: ignore[union-attr]
+        result["i_mean"].append(i_mean)  # type: ignore[union-attr]
+        result["i_over_sigma"].append(i_sig)  # type: ignore[union-attr]
+        result["r_merge"].append(r_mrg)  # type: ignore[union-attr]
+        result["r_meas"].append(r_meas)  # type: ignore[union-attr]
+        result["r_pim"].append(r_pim)  # type: ignore[union-attr]
+        result["r_anom"].append(r_anom)  # type: ignore[union-attr]
+        result["cc_half"].append(cc12)  # type: ignore[union-attr]
+        result["cc_anom"].append(ccano)  # type: ignore[union-attr]
 
     if overall_row is not None:
         result["overall"] = {
@@ -1060,7 +1317,7 @@ def parse_refine_by_experiment(text: str) -> Dict[str, List[float]]:
         return result
 
     started = False
-    for line in lines[header_idx + 1:]:
+    for line in lines[header_idx + 1 :]:
         cells = _split_table_row(line)
         if cells is None:
             if started and not line.strip():
@@ -1072,9 +1329,9 @@ def parse_refine_by_experiment(text: str) -> Dict[str, List[float]]:
             vals = [
                 float(int(cells[0])),  # exp id
                 float(int(cells[1])),  # nref
-                float(cells[2]),       # rmsd_x
-                float(cells[3]),       # rmsd_y
-                float(cells[4]),       # rmsd_z
+                float(cells[2]),  # rmsd_x
+                float(cells[3]),  # rmsd_y
+                float(cells[4]),  # rmsd_z
             ]
         except ValueError:
             continue
@@ -1117,18 +1374,18 @@ def integrate_summary_by_dataset(text: str) -> Dict[int, Dict[str, List[float]]]
         try:
             ds = int(cells[0])
             row = [
-                float(int(cells[1])),   # image
-                float(int(cells[2])),   # n_full
-                float(int(cells[3])),   # n_part
-                float(int(cells[4])),   # n_over
-                float(int(cells[5])),   # n_ice
-                float(int(cells[6])),   # n_sum
-                float(int(cells[7])),   # n_prf
-                float(cells[8]),        # ibg
-                float(cells[9]),        # isigi_sum
-                float(cells[10]),       # isigi_prf
-                float(cells[11]),       # cc_prf
-                float(cells[12]),       # rmsd_xy
+                float(int(cells[1])),  # image
+                float(int(cells[2])),  # n_full
+                float(int(cells[3])),  # n_part
+                float(int(cells[4])),  # n_over
+                float(int(cells[5])),  # n_ice
+                float(int(cells[6])),  # n_sum
+                float(int(cells[7])),  # n_prf
+                float(cells[8]),  # ibg
+                float(cells[9]),  # isigi_sum
+                float(cells[10]),  # isigi_prf
+                float(cells[11]),  # cc_prf
+                float(cells[12]),  # rmsd_xy
             ]
         except (ValueError, IndexError):
             continue
@@ -1161,8 +1418,7 @@ def parse_cluster_list(text: str) -> List[Dict[str, object]]:
             i += 1
             continue
         cid = int(m.group(1))
-        block = {"id": cid, "datasets": [], "completeness": None,
-                 "multiplicity": None}
+        block = {"id": cid, "datasets": [], "completeness": None, "multiplicity": None}
         j = i + 1
         while j < n and not _CLUSTER_HEAD_RE.match(lines[j]):
             comp = _CLUSTER_COMPLETENESS_RE.search(lines[j])
@@ -1216,7 +1472,7 @@ def _extract_json_object(text: str, start_brace: int) -> Optional[str]:
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return text[start_brace:i + 1]
+                return text[start_brace : i + 1]
     return None
 
 
@@ -1263,12 +1519,14 @@ def corrmat_cluster_series(blob: dict) -> List[Dict[str, object]]:
                 ys.append(None)
             else:
                 ys.append(v)
-        out.append({
-            "name": t.get("name", ""),
-            "x": t.get("x", []),
-            "y": ys,
-            "color": (t.get("marker", {}) or {}).get("color"),
-        })
+        out.append(
+            {
+                "name": t.get("name", ""),
+                "x": t.get("x", []),
+                "y": ys,
+                "color": (t.get("marker", {}) or {}).get("color"),
+            }
+        )
     return out
 
 
@@ -1380,22 +1638,23 @@ class ProcessRunner:
 
 
 STATUS_ICONS = {
-    "pending": "\u2b1c",   # white square
-    "running": "\u23f3",   # hourglass
-    "done": "\u2705",      # check mark
-    "failed": "\u274c",    # cross mark
+    "pending": "\u2b1c",  # white square
+    "running": "\u23f3",  # hourglass
+    "done": "\u2705",  # check mark
+    "failed": "\u274c",  # cross mark
 }
 
 
 class DialsFrame(wx.Frame):
     def __init__(self):
         super().__init__(None, title="DIALS Workflow GUI", size=(1180, 760))
+        self.SetIcon(get_app_icon())
 
         self.workdir_value = os.getcwd()
         self.status = {s.id: "pending" for s in STEPS}
         self.selected_step: Optional[StepDef] = None
-        self.field_vars: dict = {}      # step id -> {field key: _WidgetVar}
-        self.input_vars: dict = {}      # step id -> [_WidgetVar per input]
+        self.field_vars: dict = {}  # step id -> {field key: _WidgetVar}
+        self.input_vars: dict = {}  # step id -> [_WidgetVar per input]
         self.image_files: List[str] = []
 
         self.runner: Optional[ProcessRunner] = None
@@ -1407,14 +1666,14 @@ class DialsFrame(wx.Frame):
         # rebuilt per select_step(); `plot_canvas` is None when the current
         # step has no Plots tab or matplotlib is unavailable.
         self.live_output: str = ""
-        self.plot_canvas = None          # FigureCanvasWxAgg or None
-        self.plot_figure = None          # matplotlib Figure or None
-        self.plot_status_label = None    # wx.StaticText or None
-        self.progress_bar = None         # wx.Gauge or None
-        self.progress_label = None       # wx.StaticText or None
-        self.plot_page_combo = None      # wx.ComboBox or None
+        self.plot_canvas = None  # FigureCanvasWxAgg or None
+        self.plot_figure = None  # matplotlib Figure or None
+        self.plot_status_label = None  # wx.StaticText or None
+        self.progress_bar = None  # wx.Gauge or None
+        self.progress_label = None  # wx.StaticText or None
+        self.plot_page_combo = None  # wx.ComboBox or None
         self.scale_cluster_combo = None  # wx.ComboBox or None
-        self.log_cluster_combo = None    # wx.ComboBox or None
+        self.log_cluster_combo = None  # wx.ComboBox or None
         # Redrawing the figure on every streamed line is wasteful; only
         # redraw every Nth poll or on completion.
         self._poll_tick = 0
@@ -1468,6 +1727,7 @@ class DialsFrame(wx.Frame):
                 parent.workdir_value = v
                 if parent.workdir_ctrl is not None:
                     parent.workdir_ctrl.SetValue(v)
+
         return _WD()
 
     # ---------------------------------------------------------- top bar --
@@ -1477,10 +1737,13 @@ class DialsFrame(wx.Frame):
 
         # --- top bar ---
         top = wx.BoxSizer(wx.HORIZONTAL)
-        top.Add(wx.StaticText(panel, label="Working directory:"),
-                0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
-        self.workdir_ctrl = wx.TextCtrl(panel, value=self.workdir_value,
-                                        size=(480, -1))
+        top.Add(
+            wx.StaticText(panel, label="Working directory:"),
+            0,
+            wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+            4,
+        )
+        self.workdir_ctrl = wx.TextCtrl(panel, value=self.workdir_value, size=(480, -1))
         top.Add(self.workdir_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
         self.workdir_ctrl.Bind(
             wx.EVT_TEXT,
@@ -1508,8 +1771,7 @@ class DialsFrame(wx.Frame):
         self.step_buttons: dict = {}
         for s in STEPS:
             row = wx.BoxSizer(wx.HORIZONTAL)
-            icon = wx.StaticText(panel, label=STATUS_ICONS["pending"],
-                                 size=(20, -1))
+            icon = wx.StaticText(panel, label=STATUS_ICONS["pending"], size=(20, -1))
             row.Add(icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
             btn = wx.Button(panel, label=s.title, size=(260, -1))
             btn.Bind(wx.EVT_BUTTON, lambda _e, st=s: self.select_step(st))
@@ -1555,14 +1817,13 @@ class DialsFrame(wx.Frame):
             self.dials_status_label.SetForegroundColour(wx.RED)
         else:
             self.dials_status_label.SetLabel("DIALS found on $PATH")
-            self.dials_status_label.SetForegroundColour(
-                wx.Colour(0, 128, 0)
-            )
+            self.dials_status_label.SetForegroundColour(wx.Colour(0, 128, 0))
         self.dials_status_label.GetParent().Layout()
 
     def _choose_workdir(self):
-        dlg = wx.DirDialog(self, "Choose working directory",
-                           defaultPath=self.workdir_value)
+        dlg = wx.DirDialog(
+            self, "Choose working directory", defaultPath=self.workdir_value
+        )
         if dlg.ShowModal() == wx.ID_OK:
             d = dlg.GetPath()
             self.workdir_value = d
@@ -1593,8 +1854,12 @@ class DialsFrame(wx.Frame):
         # merge/export writes an MTZ or a log depending on the mode; treat
         # either produced log as done.
         if step.id == "merge_export":
-            return here("dials.merge.log") or here("dials.export.log") or \
-                here("merged.mtz") or here("scaled.mtz")
+            return (
+                here("dials.merge.log")
+                or here("dials.export.log")
+                or here("merged.mtz")
+                or here("scaled.mtz")
+            )
         # scale may have run per-cluster (no plain scaled.expt) - accept any
         # scale log/result as evidence it ran.
         if step.id == "scale":
@@ -1602,21 +1867,23 @@ class DialsFrame(wx.Frame):
                 return True
             try:
                 for nm in os.listdir(workdir):
-                    if re.match(r"dials\.scale\.cluster_\d+\.log$", nm) or \
-                       re.match(r"scaled_cluster_\d+\.expt$", nm):
+                    if re.match(r"dials\.scale\.cluster_\d+\.log$", nm) or re.match(
+                        r"scaled_cluster_\d+\.expt$", nm
+                    ):
                         return True
             except OSError:
                 pass
             return False
         # correlation_matrix declares no outputs; use its HTML/log.
         if step.id == "correlation_matrix":
-            return here("dials.correlation_matrix.html") or \
-                here("dials.correlation_matrix.log") or \
-                here("dials.correlation_matrix.scaled.html")
+            return (
+                here("dials.correlation_matrix.html")
+                or here("dials.correlation_matrix.log")
+                or here("dials.correlation_matrix.scaled.html")
+            )
 
         if step.outputs:
-            return all(here(o) for o in step.outputs
-                       if o.endswith((".expt", ".refl")))
+            return all(here(o) for o in step.outputs if o.endswith((".expt", ".refl")))
         if step.log_file:
             return here(step.log_file)
         return False
@@ -1632,7 +1899,8 @@ class DialsFrame(wx.Frame):
             if announce:
                 wx.MessageBox(
                     f"Working directory does not exist:\n{workdir}",
-                    "Load state", wx.OK | wx.ICON_WARNING,
+                    "Load state",
+                    wx.OK | wx.ICON_WARNING,
                 )
             return 0
 
@@ -1646,15 +1914,15 @@ class DialsFrame(wx.Frame):
                 # don't clobber a 'running' state; otherwise reset to pending
                 if self.status.get(s.id) != "running":
                     self.status[s.id] = "pending"
-                    self.step_buttons[s.id][1].SetLabel(
-                        STATUS_ICONS["pending"]
-                    )
+                    self.step_buttons[s.id][1].SetLabel(STATUS_ICONS["pending"])
 
         # If Import ran, reflect imported.expt as the import 'file' so the
         # Import command preview and downstream defaults make sense. We only
         # set this if the user hasn't already queued specific images.
-        if os.path.exists(os.path.join(workdir, "imported.expt")) and \
-                not self.image_files:
+        if (
+            os.path.exists(os.path.join(workdir, "imported.expt"))
+            and not self.image_files
+        ):
             self.image_files = ["imported.expt"]
 
         # Refresh the currently-displayed step so its Log/Plots/inputs pick
@@ -1665,7 +1933,8 @@ class DialsFrame(wx.Frame):
         if announce:
             wx.MessageBox(
                 f"Marked {done} step(s) as done based on files in\n{workdir}",
-                "Load state", wx.OK | wx.ICON_INFORMATION,
+                "Load state",
+                wx.OK | wx.ICON_INFORMATION,
             )
         return done
 
@@ -1739,11 +2008,18 @@ class DialsFrame(wx.Frame):
             choices = ["dials.scale.log (default)"] + [
                 f"cluster_{c}" for c in result_clusters
             ]
-            log_ctrl.Add(wx.StaticText(log_tab, label="   Log:"),
-                         0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
+            log_ctrl.Add(
+                wx.StaticText(log_tab, label="   Log:"),
+                0,
+                wx.ALIGN_CENTER_VERTICAL | wx.LEFT,
+                6,
+            )
             self.log_cluster_combo = wx.ComboBox(
-                log_tab, choices=choices, value=choices[0],
-                style=wx.CB_READONLY, size=(200, -1),
+                log_tab,
+                choices=choices,
+                value=choices[0],
+                style=wx.CB_READONLY,
+                size=(200, -1),
             )
             log_ctrl.Add(self.log_cluster_combo, 0, wx.ALL, 2)
             self.log_cluster_combo.Bind(
@@ -1797,15 +2073,18 @@ class DialsFrame(wx.Frame):
         else:
             for spec in step.inputs:
                 row = wx.BoxSizer(wx.HORIZONTAL)
-                row.Add(wx.StaticText(parent, label=spec.label, size=(170, -1)),
-                        0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+                row.Add(
+                    wx.StaticText(parent, label=spec.label, size=(170, -1)),
+                    0,
+                    wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+                    2,
+                )
                 ctrl = wx.TextCtrl(parent, value=spec.default, size=(360, -1))
                 row.Add(ctrl, 1, wx.ALL, 2)
                 sizer.Add(row, 0, wx.EXPAND)
                 var = _WidgetVar(ctrl)
                 self.input_vars[step.id].append(var)
-                ctrl.Bind(wx.EVT_TEXT,
-                          lambda _e: self._update_command_preview())
+                ctrl.Bind(wx.EVT_TEXT, lambda _e: self._update_command_preview())
 
         self.field_vars[step.id] = {}
 
@@ -1818,23 +2097,31 @@ class DialsFrame(wx.Frame):
         if step.id == "scale":
             clusters = self._available_clusters()
             row = wx.BoxSizer(wx.HORIZONTAL)
-            row.Add(wx.StaticText(parent, label="Cluster to scale",
-                                  size=(170, -1)),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-            choices = ["(none - use inputs above)"] + [
-                f"cluster_{c}" for c in clusters
-            ]
+            row.Add(
+                wx.StaticText(parent, label="Cluster to scale", size=(170, -1)),
+                0,
+                wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+                2,
+            )
+            choices = ["(none - use inputs above)"] + [f"cluster_{c}" for c in clusters]
             self.scale_cluster_combo = wx.ComboBox(
-                parent, choices=choices, value=choices[0],
-                style=wx.CB_READONLY, size=(220, -1),
+                parent,
+                choices=choices,
+                value=choices[0],
+                style=wx.CB_READONLY,
+                size=(220, -1),
             )
             row.Add(self.scale_cluster_combo, 0, wx.ALL, 2)
             if clusters:
-                note = (f"{len(clusters)} cluster(s) found: "
-                        f"{', '.join(str(c) for c in clusters)}")
+                note = (
+                    f"{len(clusters)} cluster(s) found: "
+                    f"{', '.join(str(c) for c in clusters)}"
+                )
             else:
-                note = ("(no cluster_N files yet - run Correlation Matrix "
-                        "with 'output clusters')")
+                note = (
+                    "(no cluster_N files yet - run Correlation Matrix "
+                    "with 'output clusters')"
+                )
             note_lbl = wx.StaticText(parent, label=note)
             note_lbl.SetForegroundColour(wx.Colour(128, 128, 128))
             row.Add(note_lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
@@ -1850,6 +2137,7 @@ class DialsFrame(wx.Frame):
                     exp_var.set("symmetrized.expt")
                     refl_var.set("symmetrized.refl")
                 self._update_command_preview()
+
             self.scale_cluster_combo.Bind(wx.EVT_COMBOBOX, _on_cluster_change)
 
         if step.extra_fields:
@@ -1858,31 +2146,32 @@ class DialsFrame(wx.Frame):
             sizer.Add(ph, 0, wx.ALL, 4)
         for f in step.extra_fields:
             row = wx.BoxSizer(wx.HORIZONTAL)
-            row.Add(wx.StaticText(parent, label=f.label, size=(170, -1)),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            row.Add(
+                wx.StaticText(parent, label=f.label, size=(170, -1)),
+                0,
+                wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+                2,
+            )
             if f.kind == "check":
                 checked = str(f.default).strip().lower() in ("true", "1", "yes")
                 cb = wx.CheckBox(parent)
                 cb.SetValue(checked)
                 row.Add(cb, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
                 var = _WidgetVar(cb)
-                cb.Bind(wx.EVT_CHECKBOX,
-                        lambda _e: self._update_command_preview())
+                cb.Bind(wx.EVT_CHECKBOX, lambda _e: self._update_command_preview())
             elif f.kind == "combo":
-                cb = wx.ComboBox(parent, value=f.default,
-                                 choices=f.choices or [], size=(160, -1))
+                cb = wx.ComboBox(
+                    parent, value=f.default, choices=f.choices or [], size=(160, -1)
+                )
                 row.Add(cb, 0, wx.ALL, 2)
                 var = _WidgetVar(cb)
-                cb.Bind(wx.EVT_COMBOBOX,
-                        lambda _e: self._update_command_preview())
-                cb.Bind(wx.EVT_TEXT,
-                        lambda _e: self._update_command_preview())
+                cb.Bind(wx.EVT_COMBOBOX, lambda _e: self._update_command_preview())
+                cb.Bind(wx.EVT_TEXT, lambda _e: self._update_command_preview())
             else:
                 ctrl = wx.TextCtrl(parent, value=f.default, size=(220, -1))
                 row.Add(ctrl, 0, wx.ALL, 2)
                 var = _WidgetVar(ctrl)
-                ctrl.Bind(wx.EVT_TEXT,
-                          lambda _e: self._update_command_preview())
+                ctrl.Bind(wx.EVT_TEXT, lambda _e: self._update_command_preview())
             if f.help:
                 hl = wx.StaticText(parent, label=f.help)
                 hl.SetForegroundColour(wx.Colour(128, 128, 128))
@@ -1890,8 +2179,12 @@ class DialsFrame(wx.Frame):
             sizer.Add(row, 0, wx.EXPAND)
             self.field_vars[step.id][f.key] = var
 
-        sizer.Add(wx.StaticText(parent, label="Additional parameters (free text):"),
-                  0, wx.LEFT | wx.TOP, 6)
+        sizer.Add(
+            wx.StaticText(parent, label="Additional parameters (free text):"),
+            0,
+            wx.LEFT | wx.TOP,
+            6,
+        )
         self.extra_params_ctrl = wx.TextCtrl(parent, value="", size=(560, -1))
         self.extra_params_ctrl.Bind(
             wx.EVT_TEXT, lambda _e: self._update_command_preview()
@@ -1910,6 +2203,7 @@ class DialsFrame(wx.Frame):
         if step.id == "correlation_matrix":
             us = self.field_vars[step.id].get("use_scaled")
             if us is not None:
+
                 def _on_use_scaled(_e):
                     exp_var, refl_var = self.input_vars["correlation_matrix"][:2]
                     if bool(us.get()):
@@ -1924,6 +2218,7 @@ class DialsFrame(wx.Frame):
                         self._refresh_plots_from_text(
                             step, self._plot_source_text(step)
                         )
+
                 us.ctrl.Bind(wx.EVT_CHECKBOX, _on_use_scaled)
 
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -1953,10 +2248,13 @@ class DialsFrame(wx.Frame):
         self._update_command_preview()
 
     def _build_import_inputs(self, parent, sizer, step: StepDef):
-        sizer.Add(wx.StaticText(parent, label="Image files / master file(s):"),
-                  0, wx.LEFT | wx.TOP, 4)
-        self.import_listbox = wx.ListBox(parent, size=(-1, 100),
-                                         style=wx.LB_SINGLE)
+        sizer.Add(
+            wx.StaticText(parent, label="Image files / master file(s):"),
+            0,
+            wx.LEFT | wx.TOP,
+            4,
+        )
+        self.import_listbox = wx.ListBox(parent, size=(-1, 100), style=wx.LB_SINGLE)
         for f in self.image_files:
             self.import_listbox.Append(f)
         sizer.Add(self.import_listbox, 0, wx.EXPAND | wx.ALL, 4)
@@ -1975,7 +2273,8 @@ class DialsFrame(wx.Frame):
 
     def _browse_images(self):
         dlg = wx.FileDialog(
-            self, "Select image / master files",
+            self,
+            "Select image / master files",
             defaultDir=self.workdir.get(),
             style=wx.FD_OPEN | wx.FD_MULTIPLE | wx.FD_FILE_MUST_EXIST,
         )
@@ -2028,10 +2327,8 @@ class DialsFrame(wx.Frame):
 
         cluster = self._selected_cluster()
         # correlation_matrix "use scaled data" pseudo-toggle
-        cm_use_scaled = (
-            step.id == "correlation_matrix"
-            and bool(self.field_vars.get(step.id, {}).get("use_scaled",
-                                                          _FalseVar()).get())
+        cm_use_scaled = step.id == "correlation_matrix" and bool(
+            self.field_vars.get(step.id, {}).get("use_scaled", _FalseVar()).get()
         )
 
         if step.is_import:
@@ -2072,12 +2369,14 @@ class DialsFrame(wx.Frame):
         # This mirrors the tutorial's "mkdir 0 1 2; scale in each" but keeps
         # everything in one working directory.
         if step.id == "scale" and cluster is not None:
-            args.extend([
-                f"output.experiments=scaled_cluster_{cluster}.expt",
-                f"output.reflections=scaled_cluster_{cluster}.refl",
-                f"output.html=dials.scale.cluster_{cluster}.html",
-                f"output.log=dials.scale.cluster_{cluster}.log",
-            ])
+            args.extend(
+                [
+                    f"output.experiments=scaled_cluster_{cluster}.expt",
+                    f"output.reflections=scaled_cluster_{cluster}.refl",
+                    f"output.html=dials.scale.cluster_{cluster}.html",
+                    f"output.log=dials.scale.cluster_{cluster}.log",
+                ]
+            )
 
         # correlation_matrix on scaled data: drop the GUI-only 'use_scaled'
         # pseudo-flag and redirect the HTML/log to '.scaled.' names so this
@@ -2085,10 +2384,12 @@ class DialsFrame(wx.Frame):
         if step.id == "correlation_matrix":
             args = [a for a in args if not a.startswith("use_scaled=")]
             if cm_use_scaled:
-                args.extend([
-                    "output.html=dials.correlation_matrix.scaled.html",
-                    "output.log=dials.correlation_matrix.scaled.log",
-                ])
+                args.extend(
+                    [
+                        "output.html=dials.correlation_matrix.scaled.html",
+                        "output.log=dials.correlation_matrix.scaled.log",
+                    ]
+                )
 
         return [program] + args
 
@@ -2111,20 +2412,27 @@ class DialsFrame(wx.Frame):
         if self.runner is not None and self.running_step_id is not None:
             wx.MessageBox(
                 "Another step is currently running - please wait or stop it.",
-                "Busy", wx.OK | wx.ICON_WARNING,
+                "Busy",
+                wx.OK | wx.ICON_WARNING,
             )
             return
 
         workdir = self.workdir.get()
         if not os.path.isdir(workdir):
-            wx.MessageBox(f"{workdir} is not a directory",
-                          "Invalid directory", wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                f"{workdir} is not a directory",
+                "Invalid directory",
+                wx.OK | wx.ICON_ERROR,
+            )
             return
 
         cmd = self._build_command(step)
         if step.is_import and not self.image_files:
-            wx.MessageBox("Please add at least one image / master file.",
-                          "No input files", wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                "Please add at least one image / master file.",
+                "No input files",
+                wx.OK | wx.ICON_ERROR,
+            )
             return
 
         self._set_text(self.output_text, "")
@@ -2192,9 +2500,7 @@ class DialsFrame(wx.Frame):
     def _finish_step(self, step: StepDef, returncode: int):
         ok = returncode == 0
         self.status[step.id] = "done" if ok else "failed"
-        self.step_buttons[step.id][1].SetLabel(
-            STATUS_ICONS["done" if ok else "failed"]
-        )
+        self.step_buttons[step.id][1].SetLabel(STATUS_ICONS["done" if ok else "failed"])
         if self.run_button is not None:
             self.run_button.Enable(True)
         if self.stop_button is not None:
@@ -2336,10 +2642,12 @@ class DialsFrame(wx.Frame):
         runs; otherwise the default. '' if absent."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
-            .get("use_scaled", _FalseVar()).get()
+            .get("use_scaled", _FalseVar())
+            .get()
         )
         name = (
-            "dials.correlation_matrix.scaled.html" if use_scaled
+            "dials.correlation_matrix.scaled.html"
+            if use_scaled
             else "dials.correlation_matrix.html"
         )
         return self._read_workdir_file(name)
@@ -2357,10 +2665,14 @@ class DialsFrame(wx.Frame):
         'use scaled data' selection."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
-            .get("use_scaled", _FalseVar()).get()
+            .get("use_scaled", _FalseVar())
+            .get()
         )
-        return ("dials.correlation_matrix.scaled.log" if use_scaled
-                else "dials.correlation_matrix.log")
+        return (
+            "dials.correlation_matrix.scaled.log"
+            if use_scaled
+            else "dials.correlation_matrix.log"
+        )
 
     def _current_log_text(self, step: StepDef) -> str:
         """Read back the on-disk log for this step (respecting the dynamic
@@ -2424,8 +2736,10 @@ class DialsFrame(wx.Frame):
         top = wx.BoxSizer(wx.HORIZONTAL)
         self.plot_status_label = wx.StaticText(
             parent,
-            label=("(no data yet - run this step, or plots will fill in "
-                   "live as it runs)"),
+            label=(
+                "(no data yet - run this step, or plots will fill in "
+                "live as it runs)"
+            ),
         )
         self.plot_status_label.SetForegroundColour(wx.Colour(128, 128, 128))
         top.Add(self.plot_status_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
@@ -2451,11 +2765,18 @@ class DialsFrame(wx.Frame):
         if step.plot_kind in ("find_spots", "refine", "integrate", "scale"):
             page_row = wx.BoxSizer(wx.HORIZONTAL)
             label = "Cluster" if step.plot_kind == "scale" else "Data set"
-            page_row.Add(wx.StaticText(parent, label=f"{label}:", size=(70, -1)),
-                         0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            page_row.Add(
+                wx.StaticText(parent, label=f"{label}:", size=(70, -1)),
+                0,
+                wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+                2,
+            )
             self.plot_page_combo = wx.ComboBox(
-                parent, choices=["all"], value="all",
-                style=wx.CB_READONLY, size=(180, -1),
+                parent,
+                choices=["all"],
+                value="all",
+                style=wx.CB_READONLY,
+                size=(180, -1),
             )
             page_row.Add(self.plot_page_combo, 0, wx.ALL, 2)
 
@@ -2470,9 +2791,13 @@ class DialsFrame(wx.Frame):
                     self._refresh_log_tab(s)
                 else:
                     running = self.running_step_id == s.id
-                    src = (self.live_output if running and self.live_output
-                           else self._plot_source_text(s))
+                    src = (
+                        self.live_output
+                        if running and self.live_output
+                        else self._plot_source_text(s)
+                    )
                     self._refresh_plots_from_text(s, src)
+
             self.plot_page_combo.Bind(wx.EVT_COMBOBOX, _on_page_change)
 
             if step.plot_kind == "scale":
@@ -2486,15 +2811,15 @@ class DialsFrame(wx.Frame):
         # Integration and multi-crystal indexing get a live progress bar.
         if step.plot_kind in ("integrate", "index"):
             prog_row = wx.BoxSizer(wx.HORIZONTAL)
-            initial = ("Blocks: waiting..." if step.plot_kind == "integrate"
-                       else "Indexing: waiting...")
-            self.progress_label = wx.StaticText(parent, label=initial,
-                                                size=(280, -1))
-            prog_row.Add(self.progress_label, 0,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+            initial = (
+                "Blocks: waiting..."
+                if step.plot_kind == "integrate"
+                else "Indexing: waiting..."
+            )
+            self.progress_label = wx.StaticText(parent, label=initial, size=(280, -1))
+            prog_row.Add(self.progress_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
             self.progress_bar = wx.Gauge(parent, range=100, size=(400, -1))
-            prog_row.Add(self.progress_bar, 1,
-                         wx.ALIGN_CENTER_VERTICAL | wx.ALL, 6)
+            prog_row.Add(self.progress_bar, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 6)
             sizer.Add(prog_row, 0, wx.EXPAND | wx.TOP, 4)
 
         self.plot_figure = Figure(figsize=(7.5, 5.0), dpi=100)
@@ -2607,9 +2932,7 @@ class DialsFrame(wx.Frame):
                 f"({frac*100:.0f}%)\n\n"
                 f"most recent: imageset id {prog['imageset_id']}"
             )
-            self._set_plot_status(
-                f"indexing {prog['done']}/{prog['total']} imagesets"
-            )
+            self._set_plot_status(f"indexing {prog['done']}/{prog['total']} imagesets")
         else:
             msg = (
                 "Indexing.\n\nFor multiple crystals (joint=false), a progress "
@@ -2618,8 +2941,9 @@ class DialsFrame(wx.Frame):
                 "progress;\ncheck the Summary / Full Log tabs for the result."
             )
             self._set_plot_status("(no multi-crystal indexing progress yet)")
-        ax.text(0.5, 0.5, msg, ha="center", va="center", fontsize=11,
-                transform=ax.transAxes)
+        ax.text(
+            0.5, 0.5, msg, ha="center", va="center", fontsize=11, transform=ax.transAxes
+        )
         fig.tight_layout()
 
     def _plot_find_spots(self, text: str):
@@ -2648,14 +2972,17 @@ class DialsFrame(wx.Frame):
         # colours would repeat, so we draw from a larger colormap and cycle
         # marker shapes too, keeping every line visually distinct.
         import numpy as _np
+
         try:
             import matplotlib as _mpl
+
             # matplotlib.colormaps (>=3.5) replaces the deprecated
             # matplotlib.cm.get_cmap; fall back for very old versions.
             try:
                 cmap = _mpl.colormaps["tab20"]
             except (AttributeError, KeyError):
                 import matplotlib.cm as _cm
+
                 cmap = _cm.get_cmap("tab20")
         except Exception:
             cmap = None
@@ -2667,9 +2994,20 @@ class DialsFrame(wx.Frame):
             iset = s["imageset"]
             label = f"imageset {iset}" if iset is not None else "imageset"
             color = cmap(i % 20) if cmap is not None else None
-            marker = markers[(i // 20) % len(markers)] if n > 20 else markers[i % len(markers)]
-            ax.plot(s["image"], s["pixels"], marker=marker, markersize=3,
-                    linewidth=1, color=color, label=label)
+            marker = (
+                markers[(i // 20) % len(markers)]
+                if n > 20
+                else markers[i % len(markers)]
+            )
+            ax.plot(
+                s["image"],
+                s["pixels"],
+                marker=marker,
+                markersize=3,
+                linewidth=1,
+                color=color,
+                label=label,
+            )
             labelled += 1
 
         ax.set_title("Strong pixels found per image (one line per imageset)")
@@ -2719,6 +3057,7 @@ class DialsFrame(wx.Frame):
         def _label(k, tbl):
             ids = tbl.get("ids", "")
             return f"run {k + 1} (id {ids})" if ids != "" else f"run {k + 1}"
+
         page_labels = [_label(k, t) for k, t in enumerate(tables)]
         self._update_plot_pages(page_labels)
         page = self._current_plot_page()
@@ -2740,8 +3079,9 @@ class DialsFrame(wx.Frame):
         ax.grid(True, alpha=0.3)
 
         ax2 = ax.twinx()
-        ax2.plot(steps, data["rmsd_phi"], marker="^", color="tab:green",
-                 label="RMSD_Phi/Z")
+        ax2.plot(
+            steps, data["rmsd_phi"], marker="^", color="tab:green", label="RMSD_Phi/Z"
+        )
         ax2.set_ylabel("Angular RMSD (deg) / RMSD_Z (images)")
 
         lines1, labels1 = ax.get_legend_handles_labels()
@@ -2749,9 +3089,7 @@ class DialsFrame(wx.Frame):
         ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=8)
 
         if len(tables) > 1:
-            ax.set_title(
-                f"Refinement RMSDs vs step - run {sel + 1} of {len(tables)}"
-            )
+            ax.set_title(f"Refinement RMSDs vs step - run {sel + 1} of {len(tables)}")
             self._set_plot_status(
                 f"run {sel + 1}/{len(tables)}: {len(steps)} refinement steps "
                 f"(use the Data set selector to switch run)"
@@ -2777,10 +3115,13 @@ class DialsFrame(wx.Frame):
                 in_pass = min(in_pass, n_blocks)
                 label = (
                     f"Pass {pass_no}/2 - block {in_pass}/{n_blocks}"
-                    if done else f"Blocks: 0/{n_blocks}"
+                    if done
+                    else f"Blocks: 0/{n_blocks}"
                 )
                 if progress["last_to"]:
-                    label += f"  (frames {progress['last_from']} -> {progress['last_to']})"
+                    label += (
+                        f"  (frames {progress['last_from']} -> {progress['last_to']})"
+                    )
                 self._set_progress(in_pass / n_blocks, label)
             else:
                 self._set_progress(0, "Blocks: waiting for block table...")
@@ -2806,10 +3147,7 @@ class DialsFrame(wx.Frame):
             if sel not in by_ds:
                 sel = ds_ids[0]
             summary = by_ds[sel]
-            ds_note = (
-                f"  |  data set {sel} of {len(ds_ids)}"
-                if len(ds_ids) > 1 else ""
-            )
+            ds_note = f"  |  data set {sel} of {len(ds_ids)}" if len(ds_ids) > 1 else ""
         else:
             summary = parse_integrate_summary(text)
             self._update_plot_pages(["all"])
@@ -2860,9 +3198,7 @@ class DialsFrame(wx.Frame):
         ax4.set_xlabel("Image", fontsize=8)
         ax4.grid(True, alpha=0.3)
 
-        self._set_plot_status(
-            f"Integration summary over {len(img)} images{ds_note}"
-        )
+        self._set_plot_status(f"Integration summary over {len(img)} images{ds_note}")
         fig.tight_layout()
 
     def _plot_scale(self, text: str):
@@ -2895,8 +3231,10 @@ class DialsFrame(wx.Frame):
                 cluster_note = "  |  (unclustered scale)"
             # Prefer freshly-streamed text if it clearly contains the merging
             # table and the on-disk log doesn't yet (mid-run).
-            if "Merging statistics by resolution bin" in (text or "") and \
-               "Merging statistics by resolution bin" not in src:
+            if (
+                "Merging statistics by resolution bin" in (text or "")
+                and "Merging statistics by resolution bin" not in src
+            ):
                 src = text
             text = src
         else:
@@ -2924,6 +3262,7 @@ class DialsFrame(wx.Frame):
             """Label the 1/d^2 x-axis with the actual resolution (d, in A)
             at each tick so the non-linear axis stays readable."""
             import numpy as _np  # matplotlib always brings numpy
+
             xt = _np.linspace(min(inv), max(inv), 6)
             ax.set_xticks(xt)
             ax.set_xticklabels([f"{(1.0/_np.sqrt(t)):.2f}" for t in xt])
@@ -2960,12 +3299,24 @@ class DialsFrame(wx.Frame):
 
         # Panel 4: completeness & multiplicity
         ax4 = fig.add_subplot(224)
-        ax4.plot(inv, data["completeness"], marker=".", color="tab:green",  # type: ignore[index]
-                 label="Completeness (%)", linewidth=1)
+        ax4.plot(
+            inv,
+            data["completeness"],
+            marker=".",
+            color="tab:green",  # type: ignore[index]
+            label="Completeness (%)",
+            linewidth=1,
+        )
         ax4.set_ylabel("Completeness (%)", fontsize=8)
         ax4b = ax4.twinx()
-        ax4b.plot(inv, data["mult"], marker=".", color="tab:orange",  # type: ignore[index]
-                  label="Multiplicity", linewidth=1)
+        ax4b.plot(
+            inv,
+            data["mult"],
+            marker=".",
+            color="tab:orange",  # type: ignore[index]
+            label="Multiplicity",
+            linewidth=1,
+        )
         ax4b.set_ylabel("Multiplicity", fontsize=8)
         ax4.set_title("Completeness & multiplicity", fontsize=9)
         _res_ticks(ax4)
@@ -2994,6 +3345,7 @@ class DialsFrame(wx.Frame):
         the dimensions residual curve and the Rij histogram. The page
         selector isn't used here (it's a fixed multi-panel view)."""
         import numpy as _np
+
         self._update_plot_pages(["all"])
         fig = self.plot_figure
         fig.clear()
@@ -3049,8 +3401,11 @@ class DialsFrame(wx.Frame):
             if xy is None:
                 return
             if xy["type"] == "bar":
-                ax.bar(xy["x"], xy["y"], width=(xy["x"][1] - xy["x"][0]) * 0.9
-                       if len(xy["x"]) > 1 else 0.02)
+                ax.bar(
+                    xy["x"],
+                    xy["y"],
+                    width=(xy["x"][1] - xy["x"][0]) * 0.9 if len(xy["x"]) > 1 else 0.02,
+                )
             else:
                 ax.plot(xy["x"], xy["y"], marker=".", linewidth=1)
             if logy:
@@ -3064,11 +3419,17 @@ class DialsFrame(wx.Frame):
         if cos is not None:
             panels.append(lambda ax: draw_matrix(ax, cos, "cos(angle) matrix"))
         if reach is not None:
-            panels.append(lambda ax: draw_clusters(
-                ax, reach, "OPTICS reachability", scatter=False))
+            panels.append(
+                lambda ax: draw_clusters(
+                    ax, reach, "OPTICS reachability", scatter=False
+                )
+            )
         if coords is not None:
-            panels.append(lambda ax: draw_clusters(
-                ax, coords, "Cosym PCA coordinates", scatter=True))
+            panels.append(
+                lambda ax: draw_clusters(
+                    ax, coords, "Cosym PCA coordinates", scatter=True
+                )
+            )
         if dims is not None:
             panels.append(lambda ax: draw_xy(ax, dims, logy=True))
         if rij is not None:
@@ -3077,8 +3438,7 @@ class DialsFrame(wx.Frame):
         n = len(panels)
         if n == 0:
             ax = fig.add_subplot(111)
-            ax.set_title("No recognised correlation-matrix graphs found",
-                         fontsize=9)
+            ax.set_title("No recognised correlation-matrix graphs found", fontsize=9)
             self._set_plot_status("(no plottable graphs in the HTML)")
             fig.tight_layout()
             return
@@ -3099,7 +3459,6 @@ class DialsFrame(wx.Frame):
             + (f"  |  {len(clusters)} dendrogram nodes" if clusters else "")
         )
         fig.tight_layout()
-
 
     # --------------------------------------------------------- dials.report --
     def _report_files_for_step(self, step: StepDef) -> List[str]:
@@ -3132,12 +3491,18 @@ class DialsFrame(wx.Frame):
     def run_and_show_report(self, step: StepDef):
         workdir = self.workdir.get()
         if not os.path.isdir(workdir):
-            wx.MessageBox(f"{workdir} is not a directory",
-                          "Invalid directory", wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                f"{workdir} is not a directory",
+                "Invalid directory",
+                wx.OK | wx.ICON_ERROR,
+            )
             return
         if shutil.which("dials.report") is None:
-            wx.MessageBox("dials.report was not found on $PATH.",
-                          "Not found", wx.OK | wx.ICON_ERROR)
+            wx.MessageBox(
+                "dials.report was not found on $PATH.",
+                "Not found",
+                wx.OK | wx.ICON_ERROR,
+            )
             return
 
         files = self._report_files_for_step(step)
@@ -3145,7 +3510,8 @@ class DialsFrame(wx.Frame):
             wx.MessageBox(
                 "No experiment/reflection files are set for this step yet - "
                 "fill in the input fields above (or run the step first).",
-                "No files", wx.OK | wx.ICON_WARNING,
+                "No files",
+                wx.OK | wx.ICON_WARNING,
             )
             return
 
@@ -3159,15 +3525,23 @@ class DialsFrame(wx.Frame):
                     cmd, cwd=workdir, capture_output=True, text=True
                 )
             except Exception as exc:
-                wx.CallAfter(self._report_finished, step, False,
-                             f"Could not launch dials.report: {exc}")
+                wx.CallAfter(
+                    self._report_finished,
+                    step,
+                    False,
+                    f"Could not launch dials.report: {exc}",
+                )
                 return
 
             html_path = os.path.join(workdir, "dials.report.html")
             if result.returncode != 0 or not os.path.exists(html_path):
-                tail = (result.stdout or "")[-1500:] + "\n" + (result.stderr or "")[-1500:]
+                tail = (
+                    (result.stdout or "")[-1500:] + "\n" + (result.stderr or "")[-1500:]
+                )
                 wx.CallAfter(
-                    self._report_finished, step, False,
+                    self._report_finished,
+                    step,
+                    False,
                     f"dials.report exited with code {result.returncode}:\n{tail}",
                 )
                 return
@@ -3209,8 +3583,12 @@ class DialsFrame(wx.Frame):
         ctrls = []
         for label, default in zip(arg_labels, defaults):
             row = wx.BoxSizer(wx.HORIZONTAL)
-            row.Add(wx.StaticText(dialog, label=label, size=(220, -1)),
-                    0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+            row.Add(
+                wx.StaticText(dialog, label=label, size=(220, -1)),
+                0,
+                wx.ALIGN_CENTER_VERTICAL | wx.ALL,
+                4,
+            )
             ctrl = wx.TextCtrl(dialog, value=default, size=(300, -1))
             row.Add(ctrl, 1, wx.ALL, 4)
             dsizer.Add(row, 0, wx.EXPAND)
@@ -3229,15 +3607,17 @@ class DialsFrame(wx.Frame):
             cmd = [program] + args
             workdir = self.workdir.get()
             if shutil.which(program) is None:
-                wx.MessageBox(f"{program} was not found on $PATH.",
-                              "Not found", wx.OK | wx.ICON_ERROR)
+                wx.MessageBox(
+                    f"{program} was not found on $PATH.",
+                    "Not found",
+                    wx.OK | wx.ICON_ERROR,
+                )
                 dialog.Destroy()
                 return
             try:
                 subprocess.Popen(cmd, cwd=workdir)
             except Exception as exc:
-                wx.MessageBox(str(exc), "Error launching tool",
-                              wx.OK | wx.ICON_ERROR)
+                wx.MessageBox(str(exc), "Error launching tool", wx.OK | wx.ICON_ERROR)
                 dialog.Destroy()
                 return
             if program == "dials.report":
@@ -3247,6 +3627,7 @@ class DialsFrame(wx.Frame):
                     html_path = os.path.join(workdir, "dials.report.html")
                     if os.path.exists(html_path):
                         webbrowser.open(f"file://{html_path}")
+
                 wx.CallLater(4000, _open_report)
         dialog.Destroy()
 
