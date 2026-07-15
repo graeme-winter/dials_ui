@@ -651,6 +651,14 @@ class DialsFrame(wx.Frame):
             wx.EVT_BUTTON, lambda _e: self.run_and_show_report(step)
         )
         btn_row.Add(self.report_button, 0, wx.ALL, 2)
+        # Steps that write their own HTML report get a button to open it
+        # directly (scale opens the per-cluster HTMLs if clustered).
+        if step.id in ("symmetry", "cosym", "scale", "correlation_matrix"):
+            open_html_btn = wx.Button(parent, label="Open HTML in web browser")
+            open_html_btn.Bind(
+                wx.EVT_BUTTON, lambda _e: self._open_html_for_step(step)
+            )
+            btn_row.Add(open_html_btn, 0, wx.ALL, 2)
         sizer.Add(btn_row, 0, wx.TOP, 8)
 
         self.report_status_label = wx.StaticText(parent, label="")
@@ -1047,28 +1055,81 @@ class DialsFrame(wx.Frame):
         except OSError:
             return ""
 
-    def _corrmat_html_text(self) -> str:
-        """Read the correlation-matrix HTML from the working directory (the
-        source for the correlation_matrix Plots tab). If 'use scaled data' is
-        ticked, read the '.scaled.' variant this GUI writes for post-scaling
-        runs; otherwise the default. '' if absent."""
+    def _corrmat_html_name(self) -> str:
+        """The correlation-matrix HTML filename given the current 'use scaled
+        data' selection (the '.scaled.' variant for post-scaling runs)."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
             .get("use_scaled", _FalseVar())
             .get()
         )
-        name = (
+        return (
             "dials.correlation_matrix.scaled.html"
             if use_scaled
             else "dials.correlation_matrix.html"
         )
-        return self._read_workdir_file(name)
+
+    def _corrmat_html_text(self) -> str:
+        """Read the correlation-matrix HTML from the working directory (the
+        source for the correlation_matrix Plots tab). If 'use scaled data' is
+        ticked, read the '.scaled.' variant this GUI writes for post-scaling
+        runs; otherwise the default. '' if absent."""
+        return self._read_workdir_file(self._corrmat_html_name())
 
     def _cosym_html_text(self) -> str:
         """Read dials.cosym.html from the working directory (the source for
         the cosym Plots tab, which carries the Plotly JSON blobs). '' if
         absent."""
         return self._read_workdir_file("dials.cosym.html")
+
+    def _html_files_for_step(self, step: StepDef) -> List[str]:
+        """Basenames of the HTML report file(s) this step wrote that exist in
+        the working directory (for the 'Open HTML in web browser' button).
+        scale returns the per-cluster HTMLs when any were written, else the
+        plain dials.scale.html; correlation_matrix honours the 'use scaled
+        data' toggle; cosym/symmetry return their single fixed HTML. [] if
+        none exist yet."""
+        workdir = self.workdir.get()
+
+        def here(name: str) -> bool:
+            return os.path.exists(os.path.join(workdir, name))
+
+        if step.id == "scale":
+            clusters = []
+            try:
+                for name in os.listdir(workdir):
+                    if re.match(r"dials\.scale\.cluster_\d+\.html$", name):
+                        clusters.append(name)
+            except OSError:
+                clusters = []
+            if clusters:
+                return sorted(clusters)
+            return ["dials.scale.html"] if here("dials.scale.html") else []
+        if step.id == "correlation_matrix":
+            name = self._corrmat_html_name()
+            return [name] if here(name) else []
+        if step.id == "cosym":
+            return ["dials.cosym.html"] if here("dials.cosym.html") else []
+        if step.id == "symmetry":
+            return ["dials.symmetry.html"] if here("dials.symmetry.html") else []
+        return []
+
+    def _open_html_for_step(self, step: StepDef):
+        """Open this step's HTML report(s) in the default web browser. For
+        scale, opens each per-cluster HTML if clusters were scaled, else
+        dials.scale.html. Shows a message if nothing has been written yet."""
+        files = self._html_files_for_step(step)
+        if not files:
+            wx.MessageBox(
+                "No HTML report found for this step in the working directory "
+                "yet - run the step first.",
+                "Open HTML",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        workdir = self.workdir.get()
+        for name in files:
+            webbrowser.open(f"file://{os.path.join(workdir, name)}")
 
     def _plot_source_text(self, step: StepDef) -> str:
         """The text a step's Plots tab should parse: correlation_matrix and

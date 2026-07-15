@@ -372,6 +372,18 @@ before touching any of this. What was added:
   **Tested against the user's real `/Users/graeme/data/cpp/demo/dials.cosym.html`**:
   all 5 graphs extract, all parsers verified, `_plot_cosym` rendered (Agg
   backend) → 5 axes and eyeballed. Same live-wx-loop gap as the other plots.
+- **"Open HTML in web browser" buttons** (added 2026-07-15) on the Setup &
+  Run button row for the four steps that write their own HTML report:
+  symmetry (`dials.symmetry.html`), cosym (`dials.cosym.html`),
+  correlation_matrix (`dials.correlation_matrix.html`, or the `.scaled.`
+  variant when 'use scaled data' is ticked) and scale. Scale opens **every**
+  per-cluster `dials.scale.cluster_N.html` if any were written, else the
+  plain `dials.scale.html`. `_html_files_for_step(step)` resolves the
+  existing basename(s); `_open_html_for_step(step)` `webbrowser.open`s each
+  (or shows a "run the step first" message if none exist yet). This is
+  separate from the per-step `dials.report` button — it opens the program's
+  OWN html, not a freshly generated dials.report.html. `_corrmat_html_name()`
+  was factored out of `_corrmat_html_text` so both share the use_scaled logic.
 - **The cluster list stdout parser** `parse_cluster_list` reads the
   `Cluster N / Completeness / Multiplicity / Datasets:...` blocks. It's
   available for future use (e.g. auto-populating the cluster selector from
