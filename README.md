@@ -1,6 +1,6 @@
 # DIALS Workflow GUI
 
-A single-file, wxPython graphical front end for stepping through DIALS
+A wxPython graphical front end for stepping through DIALS
 macromolecular crystallography data processing, built around the workflow
 described in the CCP4/DLS & CCP4/APS 2024 tutorials:
 https://github.com/graeme-winter/dials_tutorials/tree/main/ccp4-dls-2024
@@ -27,7 +27,42 @@ subprocess, streams the live output to screen, and then reads back the
   (`pip install matplotlib`, or `libtbx.pip install matplotlib` inside a
   DIALS environment).
 
+## Installation
+
+The GUI is packaged as `dials-gui` (import package `dialsgui`).
+
+**Inside a sourced DIALS / cctbx environment** (the usual case — wxPython and
+matplotlib are already provided there), install without letting pip try to
+rebuild wxPython:
+
+```
+libtbx.pip install --no-deps dials-gui        # from PyPI, once published
+# or, from a checkout:
+libtbx.pip install --no-deps .
+```
+
+**In a plain Python environment**, a normal install pulls wxPython, and the
+`[plots]` extra adds matplotlib for the live Plots tab:
+
+```
+pip install "dials-gui[plots]"                 # from PyPI, once published
+# or, from a checkout:
+pip install ".[plots]"
+```
+
+Installing creates two equivalent console commands, `dials-gui` and
+`dials.gui` (the latter matching the `dials.*` command family).
+
 ## Running
+
+Once installed:
+
+```
+dials-gui          # or: dials.gui
+```
+
+Or straight from a source checkout without installing (`dials_gui.py` is a
+thin launcher for the `dialsgui/` package next to it):
 
 ```
 python3 dials_gui.py

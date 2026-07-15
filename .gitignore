@@ -1,0 +1,15 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# macOS app bundle produced by make_app.sh
+dials_gui.app/
+
+# OS cruft
+.DS_Store

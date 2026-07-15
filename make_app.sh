@@ -28,7 +28,7 @@ SCRIPT_PATH="${1:-dials_gui.py}"
 APP_NAME="dials_gui"                      # -> dials_gui.app
 BUNDLE_ID="org.necat.dialsgui"
 DISPLAY_NAME="DIALS Workflow GUI"
-VERSION="1.0"
+VERSION="1.0.0"
 # Python interpreter used at launch time; override with:
 #   DIALS_GUI_PYTHON=/path/to/python3 ./make_app.sh
 PYTHON_BIN_DEFAULT="python3"

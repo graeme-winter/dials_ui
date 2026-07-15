@@ -27,6 +27,13 @@ Files:
 - `dialsgui/` — the application package (see "Package layout" below).
 - `make_app.sh` — bundles the launcher **and** the `dialsgui/` package into a
   macOS `.app`, extracting the icon from `dialsgui/icon.py`.
+- `pyproject.toml` — pip packaging (setuptools/PEP 621). Distribution name
+  `dials-gui`, import package `dialsgui`, console scripts `dials-gui` and
+  `dials.gui` → `dialsgui.app:main`. `wxPython` is a hard dependency;
+  `matplotlib` is the optional `[plots]` extra (soft dependency, Plots tab
+  only). Version lives here (currently `1.0.0`) and is also hard-coded in
+  `make_app.sh` (`VERSION`) — bump both together.
+- `LICENSE` — BSD-3-Clause.
 - `README.md` — user-facing usage doc, written alongside the code.
 
 ## Package layout
