@@ -39,6 +39,9 @@ from .parsers import (
     corrmat_cluster_series,
     corrmat_matrix,
     corrmat_xy,
+    cosym_dendrogram,
+    cosym_hist_series,
+    cosym_scatter_series,
     extract_corrmat_graphs,
     integrate_summary_by_dataset,
     parse_all_refine_steps,
@@ -630,6 +633,27 @@ class DialsFrame(wx.Frame):
 
                 us.ctrl.Bind(wx.EVT_CHECKBOX, _on_use_scaled)
 
+        # Index: multi-crystal (joint=false) and multi-sweep (joint=true) are
+        # mutually exclusive - ticking one unticks the other (both emit the
+        # 'joint' parameter, just with opposite values).
+        if step.id == "index":
+            joint_var = self.field_vars[step.id].get("joint")
+            sweep_var = self.field_vars[step.id].get("multi_sweep")
+            if joint_var is not None and sweep_var is not None:
+
+                def _on_joint(_e):
+                    if bool(joint_var.get()):
+                        sweep_var.set(False)
+                    self._update_command_preview()
+
+                def _on_sweep(_e):
+                    if bool(sweep_var.get()):
+                        joint_var.set(False)
+                    self._update_command_preview()
+
+                joint_var.ctrl.Bind(wx.EVT_CHECKBOX, _on_joint)
+                sweep_var.ctrl.Bind(wx.EVT_CHECKBOX, _on_sweep)
+
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
         self.run_button = wx.Button(
             parent,
@@ -648,6 +672,14 @@ class DialsFrame(wx.Frame):
             wx.EVT_BUTTON, lambda _e: self.run_and_show_report(step)
         )
         btn_row.Add(self.report_button, 0, wx.ALL, 2)
+        # Steps that write their own HTML report get a button to open it
+        # directly (scale opens the per-cluster HTMLs if clustered).
+        if step.id in ("symmetry", "cosym", "scale", "correlation_matrix"):
+            open_html_btn = wx.Button(parent, label="Open HTML in web browser")
+            open_html_btn.Bind(
+                wx.EVT_BUTTON, lambda _e: self._open_html_for_step(step)
+            )
+            btn_row.Add(open_html_btn, 0, wx.ALL, 2)
         sizer.Add(btn_row, 0, wx.TOP, 8)
 
         self.report_status_label = wx.StaticText(parent, label="")
@@ -844,6 +876,11 @@ class DialsFrame(wx.Frame):
             )
             return
 
+        # Switch to the Live Output tab (index 1) so the user sees the
+        # streamed output immediately when they hit Run.
+        if self.notebook is not None:
+            self.notebook.SetSelection(1)
+
         self._set_text(self.output_text, "")
         self._append_text(self.output_text, f"$ {' '.join(cmd)}\n\n")
         self._set_text(self.summary_text, "(running...)")
@@ -941,7 +978,7 @@ class DialsFrame(wx.Frame):
         # the very end).
         if step.plot_kind and HAVE_MPL:
             src = self._plot_source_text(step)
-            if step.plot_kind == "correlation_matrix":
+            if step.plot_kind in ("correlation_matrix", "cosym"):
                 self._refresh_plots_from_text(step, src)
             else:
                 self._refresh_plots_from_text(
@@ -1044,29 +1081,90 @@ class DialsFrame(wx.Frame):
         except OSError:
             return ""
 
-    def _corrmat_html_text(self) -> str:
-        """Read the correlation-matrix HTML from the working directory (the
-        source for the correlation_matrix Plots tab). If 'use scaled data' is
-        ticked, read the '.scaled.' variant this GUI writes for post-scaling
-        runs; otherwise the default. '' if absent."""
+    def _corrmat_html_name(self) -> str:
+        """The correlation-matrix HTML filename given the current 'use scaled
+        data' selection (the '.scaled.' variant for post-scaling runs)."""
         use_scaled = bool(
             self.field_vars.get("correlation_matrix", {})
             .get("use_scaled", _FalseVar())
             .get()
         )
-        name = (
+        return (
             "dials.correlation_matrix.scaled.html"
             if use_scaled
             else "dials.correlation_matrix.html"
         )
-        return self._read_workdir_file(name)
+
+    def _corrmat_html_text(self) -> str:
+        """Read the correlation-matrix HTML from the working directory (the
+        source for the correlation_matrix Plots tab). If 'use scaled data' is
+        ticked, read the '.scaled.' variant this GUI writes for post-scaling
+        runs; otherwise the default. '' if absent."""
+        return self._read_workdir_file(self._corrmat_html_name())
+
+    def _cosym_html_text(self) -> str:
+        """Read dials.cosym.html from the working directory (the source for
+        the cosym Plots tab, which carries the Plotly JSON blobs). '' if
+        absent."""
+        return self._read_workdir_file("dials.cosym.html")
+
+    def _html_files_for_step(self, step: StepDef) -> List[str]:
+        """Basenames of the HTML report file(s) this step wrote that exist in
+        the working directory (for the 'Open HTML in web browser' button).
+        scale returns the per-cluster HTMLs when any were written, else the
+        plain dials.scale.html; correlation_matrix honours the 'use scaled
+        data' toggle; cosym/symmetry return their single fixed HTML. [] if
+        none exist yet."""
+        workdir = self.workdir.get()
+
+        def here(name: str) -> bool:
+            return os.path.exists(os.path.join(workdir, name))
+
+        if step.id == "scale":
+            clusters = []
+            try:
+                for name in os.listdir(workdir):
+                    if re.match(r"dials\.scale\.cluster_\d+\.html$", name):
+                        clusters.append(name)
+            except OSError:
+                clusters = []
+            if clusters:
+                return sorted(clusters)
+            return ["dials.scale.html"] if here("dials.scale.html") else []
+        if step.id == "correlation_matrix":
+            name = self._corrmat_html_name()
+            return [name] if here(name) else []
+        if step.id == "cosym":
+            return ["dials.cosym.html"] if here("dials.cosym.html") else []
+        if step.id == "symmetry":
+            return ["dials.symmetry.html"] if here("dials.symmetry.html") else []
+        return []
+
+    def _open_html_for_step(self, step: StepDef):
+        """Open this step's HTML report(s) in the default web browser. For
+        scale, opens each per-cluster HTML if clusters were scaled, else
+        dials.scale.html. Shows a message if nothing has been written yet."""
+        files = self._html_files_for_step(step)
+        if not files:
+            wx.MessageBox(
+                "No HTML report found for this step in the working directory "
+                "yet - run the step first.",
+                "Open HTML",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+        workdir = self.workdir.get()
+        for name in files:
+            webbrowser.open(f"file://{os.path.join(workdir, name)}")
 
     def _plot_source_text(self, step: StepDef) -> str:
-        """The text a step's Plots tab should parse: the correlation_matrix
-        step plots from its HTML output (which carries the Plotly JSON blobs),
-        every other plot step from its .log file."""
+        """The text a step's Plots tab should parse: correlation_matrix and
+        cosym plot from their HTML output (which carries the Plotly JSON
+        blobs), every other plot step from its .log file."""
         if step.plot_kind == "correlation_matrix":
             return self._corrmat_html_text()
+        if step.plot_kind == "cosym":
+            return self._cosym_html_text()
         return self._current_log_text(step)
 
     def _corrmat_log_name(self) -> str:
@@ -1154,7 +1252,7 @@ class DialsFrame(wx.Frame):
         top.Add(self.plot_status_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
         refresh_label = (
             "Refresh plots from HTML"
-            if step.plot_kind == "correlation_matrix"
+            if step.plot_kind in ("correlation_matrix", "cosym")
             else "Refresh plots from log"
         )
         refresh_btn = wx.Button(parent, label=refresh_label)
@@ -1286,6 +1384,8 @@ class DialsFrame(wx.Frame):
                 self._plot_scale(text)
             elif kind == "correlation_matrix":
                 self._plot_correlation_matrix(text)
+            elif kind == "cosym":
+                self._plot_cosym(text)
         except Exception as exc:  # pragma: no cover - defensive redraw guard
             self._set_plot_status(f"(plot error: {exc})")
             return
@@ -1867,6 +1967,128 @@ class DialsFrame(wx.Frame):
             f"correlation_matrix: {n} graphs from HTML"
             + (f"  |  {len(clusters)} dendrogram nodes" if clusters else "")
         )
+        fig.tight_layout()
+
+    def _plot_cosym(self, text: str):
+        """Plot the diagnostics embedded in dials.cosym.html.
+
+        Like _plot_correlation_matrix, the source here is the HTML file
+        (passed in as `text`), not a .log - it carries the same Plotly JSON
+        blobs, which we parse and re-render with matplotlib. Shows: the cosym
+        coordinate scatter (Axis 0 vs Axis 1), the Rij-matrix histogram, the
+        unit-cell parameter scatter (a/b/c pairs) and histogram, and the
+        unit-cell clustering dendrogram. The page selector isn't used here
+        (it's a fixed multi-panel view, same as correlation_matrix)."""
+        self._update_plot_pages(["all"])
+        fig = self.plot_figure
+        fig.clear()
+
+        graphs = extract_corrmat_graphs(text) if text else {}
+        if not graphs:
+            ax = fig.add_subplot(111)
+            self._set_plot_status(
+                "(run dials.cosym, or use 'Refresh plots from HTML' - reads "
+                "dials.cosym.html)"
+            )
+            ax.set_title("Cosym analysis (pending)")
+            fig.tight_layout()
+            return
+
+        coords = graphs.get("graphs_cosym_coordinates")
+        rij = graphs.get("graphs_cosym_rij_histogram")
+        uc_scatter = graphs.get("graphs_uc_scatter")
+        uc_hist = graphs.get("graphs_uc_hist")
+        uc_clustering = graphs.get("graphs_uc_clustering")
+
+        def _pairs(s):
+            # drop index-aligned points where either coordinate failed to parse
+            xs, ys = [], []
+            for x, y in zip(s["x"], s["y"]):
+                if x is not None and y is not None:
+                    xs.append(x)
+                    ys.append(y)
+            return xs, ys
+
+        def draw_coords(ax):
+            for s in cosym_scatter_series(coords):
+                xs, ys = _pairs(s)
+                ax.scatter(xs, ys, s=4, alpha=0.5, label=s["name"])
+            ax.set_title("Cosym coordinates", fontsize=9)
+            ax.set_xlabel("Axis 0", fontsize=7)
+            ax.set_ylabel("Axis 1", fontsize=7)
+            ax.tick_params(labelsize=6)
+
+        def draw_rij(ax):
+            xy = corrmat_xy(rij)
+            if xy is None:
+                return
+            xs = xy["x"]
+            width = (xs[1] - xs[0]) * 0.9 if len(xs) > 1 else 0.02
+            ax.bar(xs, xy["y"], width=width)
+            ax.set_title(xy["title"] or "Rij histogram", fontsize=9)
+            ax.set_xlabel(xy["xtitle"] or "r_ij", fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.grid(True, alpha=0.3)
+
+        def draw_uc_scatter(ax):
+            for s in cosym_scatter_series(uc_scatter):
+                xs, ys = _pairs(s)
+                ax.scatter(xs, ys, s=6, label=s["name"])
+            ax.set_title("Unit cell parameters", fontsize=9)
+            ax.set_xlabel("Å", fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.legend(fontsize=6)
+
+        def draw_uc_hist(ax):
+            for s in cosym_hist_series(uc_hist):
+                if s["values"]:
+                    ax.hist(s["values"], bins=20, alpha=0.5, label=s["name"])
+            ax.set_title("Unit cell distribution", fontsize=9)
+            ax.set_xlabel("Å", fontsize=7)
+            ax.set_ylabel("Frequency", fontsize=7)
+            ax.tick_params(labelsize=6)
+            ax.legend(fontsize=6)
+
+        def draw_dendrogram(ax):
+            for seg in cosym_dendrogram(uc_clustering):
+                xs, ys = _pairs(seg)
+                if xs:
+                    ax.plot(xs, ys, linewidth=0.8, color="steelblue")
+            ax.set_title("Unit cell clustering", fontsize=9)
+            ax.set_xlabel("Dataset", fontsize=7)
+            ax.set_ylabel("Distance (Å²)", fontsize=7)
+            ax.tick_params(labelsize=6)
+
+        panels = []
+        if coords is not None:
+            panels.append(draw_coords)
+        if rij is not None:
+            panels.append(draw_rij)
+        if uc_scatter is not None:
+            panels.append(draw_uc_scatter)
+        if uc_hist is not None:
+            panels.append(draw_uc_hist)
+        if uc_clustering is not None:
+            panels.append(draw_dendrogram)
+
+        n = len(panels)
+        if n == 0:
+            ax = fig.add_subplot(111)
+            ax.set_title("No recognised cosym graphs found", fontsize=9)
+            self._set_plot_status("(no plottable graphs in the HTML)")
+            fig.tight_layout()
+            return
+
+        ncols = 2
+        nrows = (n + ncols - 1) // ncols
+        for i, draw in enumerate(panels):
+            ax = fig.add_subplot(nrows, ncols, i + 1)
+            try:
+                draw(ax)
+            except Exception:
+                ax.set_title("(failed to draw)", fontsize=8)
+
+        self._set_plot_status(f"cosym: {n} graphs from HTML")
         fig.tight_layout()
 
     # --------------------------------------------------------- dials.report --

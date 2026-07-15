@@ -239,6 +239,16 @@ before touching any of this. What was added:
   state: `_build_setup_tab` reads it (`"true"/"1"/"yes"` → ticked), so a
   check field can start checked. `joint` and `anomalous` leave `default`
   empty (start unticked); `significant_clusters.output` sets `default="True"`.
+  Later addition (2026-07-15): a **multi-sweep (joint=true)** checkbox sits
+  next to it for multiple sweeps of ONE crystal that share an orientation
+  matrix. Both emit the `joint` parameter but with opposite values, so they
+  need distinct *storage* keys — hence new `ExtraField.arg_key` (the CLI
+  parameter name to emit, defaulting to `key`): the field is stored under
+  `key="multi_sweep"` but `build_arg` emits `arg_key="joint"` →
+  `joint=true`. `_build_setup_tab` has an `if step.id == "index"` block that
+  makes the two checkboxes **mutually exclusive** (ticking one `.set(False)`s
+  the other — programmatic SetValue doesn't fire EVT_CHECKBOX, so no
+  recursion), mirroring the correlation_matrix `use_scaled` handler pattern.
 - **Two new steps**, both `optional=True`, inserted between Symmetry and
   Scale: `cosym` (`dials.cosym`, id `cosym`, title "8b") which replaces
   `dials.symmetry` for many crystals and writes the same
@@ -348,6 +358,42 @@ before touching any of this. What was added:
   format matplotlib won't take directly, so cluster colours are left to
   matplotlib's cycle rather than parsed — don't "fix" this by feeding the
   rgb strings straight in.
+- **cosym plots also come from HTML, not a `.log`** (added 2026-07-15,
+  mirroring correlation_matrix on explicit request). The cosym StepDef gained
+  `plot_kind="cosym"`; `_plot_source_text` returns `dials.cosym.html`
+  (via `_cosym_html_text()`) for it, and `_finish_step` / the Refresh button
+  treat it like correlation_matrix (plot from HTML, never fall back to
+  `live_output`; "Refresh plots from HTML" label; no page selector — a fixed
+  multi-panel view). Extraction reuses the **generic** `extract_corrmat_graphs`
+  (the `var graphs_X = {...}` scanner is program-agnostic — the "corrmat" name
+  is historical). New shaping helpers in `parsers.py`: `cosym_scatter_series`
+  (multi-trace scatter → float-coerced x/y; DIALS emits these as *strings*, so
+  `_to_floats` is load-bearing), `cosym_hist_series` (Plotly histograms carry
+  x-values only — matplotlib bins them via `ax.hist`), `cosym_dendrogram`
+  (each trace is one bracket → line segments). The Rij histogram reuses
+  `corrmat_xy` (same single-bar-trace shape). `_plot_cosym` draws up to five
+  panels from `graphs_cosym_coordinates` (Axis 0/1 scatter),
+  `graphs_cosym_rij_histogram` (bar), `graphs_uc_scatter` (a/b/c-pair
+  scatter, overlaid), `graphs_uc_hist` (unit-cell histograms, overlaid), and
+  `graphs_uc_clustering` (dendrogram lines). `graphs_pca_analysis`-style SPLOM
+  blobs aren't present here. Also: `_plotly_text` (new, shared by `corrmat_xy`)
+  now strips HTML tags from titles/axis-labels — DIALS writes `r<sub>ij</sub>`
+  and `Distance (Å<sup>2</sup>)` which used to render with the raw tags.
+  **Tested against the user's real `/Users/graeme/data/cpp/demo/dials.cosym.html`**:
+  all 5 graphs extract, all parsers verified, `_plot_cosym` rendered (Agg
+  backend) → 5 axes and eyeballed. Same live-wx-loop gap as the other plots.
+- **"Open HTML in web browser" buttons** (added 2026-07-15) on the Setup &
+  Run button row for the four steps that write their own HTML report:
+  symmetry (`dials.symmetry.html`), cosym (`dials.cosym.html`),
+  correlation_matrix (`dials.correlation_matrix.html`, or the `.scaled.`
+  variant when 'use scaled data' is ticked) and scale. Scale opens **every**
+  per-cluster `dials.scale.cluster_N.html` if any were written, else the
+  plain `dials.scale.html`. `_html_files_for_step(step)` resolves the
+  existing basename(s); `_open_html_for_step(step)` `webbrowser.open`s each
+  (or shows a "run the step first" message if none exist yet). This is
+  separate from the per-step `dials.report` button — it opens the program's
+  OWN html, not a freshly generated dials.report.html. `_corrmat_html_name()`
+  was factored out of `_corrmat_html_text` so both share the use_scaled logic.
 - **The cluster list stdout parser** `parse_cluster_list` reads the
   `Cluster N / Completeness / Multiplicity / Datasets:...` blocks. It's
   available for future use (e.g. auto-populating the cluster selector from

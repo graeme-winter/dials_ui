@@ -721,7 +721,87 @@ def corrmat_xy(blob: dict) -> Optional[Dict[str, object]]:
         "x": tr.get("x", []),
         "y": tr.get("y", []),
         "type": tr.get("type", "line"),
-        "title": layout.get("title", ""),
-        "xtitle": (layout.get("xaxis", {}) or {}).get("title", ""),
-        "ytitle": (layout.get("yaxis", {}) or {}).get("title", ""),
+        "title": _plotly_text(layout.get("title", "")),
+        "xtitle": _plotly_text((layout.get("xaxis", {}) or {}).get("title", "")),
+        "ytitle": _plotly_text((layout.get("yaxis", {}) or {}).get("title", "")),
     }
+
+
+# --------------------------------------------------------------------------
+# dials.cosym.html embedded-Plotly-JSON extraction
+# --------------------------------------------------------------------------
+#
+# dials.cosym writes a dials.cosym.html with the SAME `var graphs_X = {...}`
+# Plotly-JSON layout as dials.correlation_matrix, so extract_corrmat_graphs
+# reads it too (the regex/brace scanner is program-agnostic). The blobs we
+# know how to render with matplotlib are:
+#   graphs_cosym_coordinates    - cosym coordinate scatter (Axis 0 vs Axis 1)
+#   graphs_cosym_rij_histogram  - histogram of the Rij matrix values (bar;
+#                                 use corrmat_xy, same single-trace shape)
+#   graphs_uc_scatter           - unit-cell parameter scatter (a/b/c pairs)
+#   graphs_uc_hist              - unit-cell parameter histograms (x only)
+#   graphs_uc_clustering        - unit-cell clustering dendrogram (line
+#                                 segments)
+
+
+def _plotly_text(v) -> str:
+    """A Plotly title/axis-title is either a plain string or a
+    {'text': ...} dict; return the string form with any HTML markup (e.g.
+    the <sub>/<sup> tags DIALS uses in 'r<sub>ij</sub>' or 'Distance
+    (Å<sup>2</sup>)') stripped. '' if absent."""
+    if isinstance(v, dict):
+        v = v.get("text", "")
+    return re.sub(r"<[^>]+>", "", v or "")
+
+
+def _to_floats(seq) -> List[Optional[float]]:
+    """Coerce a Plotly x/y list (DIALS often emits these as strings) to
+    floats; anything that won't parse becomes None so paired x/y lists stay
+    index-aligned."""
+    out: List[Optional[float]] = []
+    for v in seq or []:
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            out.append(None)
+    return out
+
+
+def cosym_scatter_series(blob: dict) -> List[Dict[str, object]]:
+    """Multi-trace scatter blob (cosym coordinates, unit-cell a/b/c pairs) ->
+    [{'name','x','y'}] with x/y coerced to floats."""
+    out = []
+    for t in blob.get("data", []):
+        out.append(
+            {
+                "name": t.get("name", ""),
+                "x": _to_floats(t.get("x", [])),
+                "y": _to_floats(t.get("y", [])),
+            }
+        )
+    return out
+
+
+def cosym_hist_series(blob: dict) -> List[Dict[str, object]]:
+    """Unit-cell histogram blob -> [{'name','values'}]. Plotly histograms
+    carry only x-values (matplotlib bins them itself); non-numeric values
+    are dropped."""
+    out = []
+    for t in blob.get("data", []):
+        vals = [v for v in _to_floats(t.get("x", [])) if v is not None]
+        out.append({"name": t.get("name", ""), "values": vals})
+    return out
+
+
+def cosym_dendrogram(blob: dict) -> List[Dict[str, object]]:
+    """Unit-cell clustering dendrogram blob -> [{'x','y'}] line segments
+    (each Plotly trace is one bracket of the dendrogram)."""
+    out = []
+    for t in blob.get("data", []):
+        out.append(
+            {
+                "x": _to_floats(t.get("x", [])),
+                "y": _to_floats(t.get("y", [])),
+            }
+        )
+    return out
