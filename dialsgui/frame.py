@@ -633,6 +633,27 @@ class DialsFrame(wx.Frame):
 
                 us.ctrl.Bind(wx.EVT_CHECKBOX, _on_use_scaled)
 
+        # Index: multi-crystal (joint=false) and multi-sweep (joint=true) are
+        # mutually exclusive - ticking one unticks the other (both emit the
+        # 'joint' parameter, just with opposite values).
+        if step.id == "index":
+            joint_var = self.field_vars[step.id].get("joint")
+            sweep_var = self.field_vars[step.id].get("multi_sweep")
+            if joint_var is not None and sweep_var is not None:
+
+                def _on_joint(_e):
+                    if bool(joint_var.get()):
+                        sweep_var.set(False)
+                    self._update_command_preview()
+
+                def _on_sweep(_e):
+                    if bool(sweep_var.get()):
+                        joint_var.set(False)
+                    self._update_command_preview()
+
+                joint_var.ctrl.Bind(wx.EVT_CHECKBOX, _on_joint)
+                sweep_var.ctrl.Bind(wx.EVT_CHECKBOX, _on_sweep)
+
         btn_row = wx.BoxSizer(wx.HORIZONTAL)
         self.run_button = wx.Button(
             parent,

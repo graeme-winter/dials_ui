@@ -20,16 +20,22 @@ class ExtraField:
     # "True" (so the arg is `key=True`); set to e.g. "false" for a toggle
     # like joint=false that should emit `joint=false` when ticked.
     check_value: str = "True"
+    # The CLI parameter name to emit (defaults to `key`). Set this when two
+    # fields need distinct storage keys but must emit the SAME parameter -
+    # e.g. the index step's multi-crystal (joint=false) and multi-sweep
+    # (joint=true) checkboxes both emit `joint=...` but are stored separately.
+    arg_key: Optional[str] = None
 
     def build_arg(self, value) -> Optional[str]:
+        key = self.arg_key or self.key
         if self.kind == "check":
             if value:
-                return f"{self.key}={self.check_value}"
+                return f"{key}={self.check_value}"
             return None
         value = (value or "").strip()
         if not value:
             return None
-        return f"{self.key}={value}"
+        return f"{key}={value}"
 
 
 @dataclass

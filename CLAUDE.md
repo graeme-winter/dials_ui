@@ -239,6 +239,16 @@ before touching any of this. What was added:
   state: `_build_setup_tab` reads it (`"true"/"1"/"yes"` → ticked), so a
   check field can start checked. `joint` and `anomalous` leave `default`
   empty (start unticked); `significant_clusters.output` sets `default="True"`.
+  Later addition (2026-07-15): a **multi-sweep (joint=true)** checkbox sits
+  next to it for multiple sweeps of ONE crystal that share an orientation
+  matrix. Both emit the `joint` parameter but with opposite values, so they
+  need distinct *storage* keys — hence new `ExtraField.arg_key` (the CLI
+  parameter name to emit, defaulting to `key`): the field is stored under
+  `key="multi_sweep"` but `build_arg` emits `arg_key="joint"` →
+  `joint=true`. `_build_setup_tab` has an `if step.id == "index"` block that
+  makes the two checkboxes **mutually exclusive** (ticking one `.set(False)`s
+  the other — programmatic SetValue doesn't fire EVT_CHECKBOX, so no
+  recursion), mirroring the correlation_matrix `use_scaled` handler pattern.
 - **Two new steps**, both `optional=True`, inserted between Symmetry and
   Scale: `cosym` (`dials.cosym`, id `cosym`, title "8b") which replaces
   `dials.symmetry` for many crystals and writes the same

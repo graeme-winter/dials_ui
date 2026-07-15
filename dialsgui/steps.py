@@ -77,7 +77,10 @@ STEPS: List[StepDef] = [
             "options below. For MULTIPLE crystals (many imported sweeps "
             "that do not share an orientation matrix), tick 'multi-crystal "
             "(joint=false)' so each sweep is indexed independently in one "
-            "run - see the Cows/Pigs/People workflow."
+            "run - see the Cows/Pigs/People workflow. For MULTIPLE sweeps of "
+            "the SAME crystal that DO share an orientation matrix, tick "
+            "'multi-sweep (joint=true)' to index them jointly. The two are "
+            "mutually exclusive - ticking one unticks the other."
         ),
         inputs=[
             InputSpec("Experiment file", "imported.expt"),
@@ -90,6 +93,14 @@ STEPS: List[StepDef] = [
                 "check",
                 check_value="false",
                 help="index many crystals independently in one run",
+            ),
+            ExtraField(
+                "multi_sweep",
+                "multi-sweep (joint=true)",
+                "check",
+                arg_key="joint",
+                check_value="true",
+                help="index multiple sweeps of one crystal jointly",
             ),
             ExtraField("space_group", "space_group", "entry"),
             ExtraField(
