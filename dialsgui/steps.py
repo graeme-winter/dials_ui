@@ -204,7 +204,9 @@ STEPS: List[StepDef] = [
             "(replaces dials.symmetry). Aligns the lattices in reciprocal "
             "space, estimates the crystal symmetry, and writes "
             "symmetrized.expt / symmetrized.refl plus dials.cosym.html. Run "
-            "this instead of Symmetry when you indexed with joint=false."
+            "this instead of Symmetry when you indexed with joint=false. The "
+            "Plots tab visualises the cosym coordinates, Rij histogram and "
+            "unit-cell distribution / clustering from the HTML."
         ),
         inputs=[
             InputSpec("Experiment file", "integrated.expt"),
@@ -213,6 +215,7 @@ STEPS: List[StepDef] = [
         outputs=["symmetrized.expt", "symmetrized.refl"],
         log_file="dials.cosym.log",
         optional=True,
+        plot_kind="cosym",
     ),
     StepDef(
         id="correlation_matrix",

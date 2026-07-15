@@ -348,6 +348,30 @@ before touching any of this. What was added:
   format matplotlib won't take directly, so cluster colours are left to
   matplotlib's cycle rather than parsed — don't "fix" this by feeding the
   rgb strings straight in.
+- **cosym plots also come from HTML, not a `.log`** (added 2026-07-15,
+  mirroring correlation_matrix on explicit request). The cosym StepDef gained
+  `plot_kind="cosym"`; `_plot_source_text` returns `dials.cosym.html`
+  (via `_cosym_html_text()`) for it, and `_finish_step` / the Refresh button
+  treat it like correlation_matrix (plot from HTML, never fall back to
+  `live_output`; "Refresh plots from HTML" label; no page selector — a fixed
+  multi-panel view). Extraction reuses the **generic** `extract_corrmat_graphs`
+  (the `var graphs_X = {...}` scanner is program-agnostic — the "corrmat" name
+  is historical). New shaping helpers in `parsers.py`: `cosym_scatter_series`
+  (multi-trace scatter → float-coerced x/y; DIALS emits these as *strings*, so
+  `_to_floats` is load-bearing), `cosym_hist_series` (Plotly histograms carry
+  x-values only — matplotlib bins them via `ax.hist`), `cosym_dendrogram`
+  (each trace is one bracket → line segments). The Rij histogram reuses
+  `corrmat_xy` (same single-bar-trace shape). `_plot_cosym` draws up to five
+  panels from `graphs_cosym_coordinates` (Axis 0/1 scatter),
+  `graphs_cosym_rij_histogram` (bar), `graphs_uc_scatter` (a/b/c-pair
+  scatter, overlaid), `graphs_uc_hist` (unit-cell histograms, overlaid), and
+  `graphs_uc_clustering` (dendrogram lines). `graphs_pca_analysis`-style SPLOM
+  blobs aren't present here. Also: `_plotly_text` (new, shared by `corrmat_xy`)
+  now strips HTML tags from titles/axis-labels — DIALS writes `r<sub>ij</sub>`
+  and `Distance (Å<sup>2</sup>)` which used to render with the raw tags.
+  **Tested against the user's real `/Users/graeme/data/cpp/demo/dials.cosym.html`**:
+  all 5 graphs extract, all parsers verified, `_plot_cosym` rendered (Agg
+  backend) → 5 axes and eyeballed. Same live-wx-loop gap as the other plots.
 - **The cluster list stdout parser** `parse_cluster_list` reads the
   `Cluster N / Completeness / Multiplicity / Datasets:...` blocks. It's
   available for future use (e.g. auto-populating the cluster selector from
