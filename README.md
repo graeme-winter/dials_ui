@@ -1,9 +1,8 @@
 # DIALS Workflow GUI
 
-A single-file, dependency-free (standard library only) graphical front end
-for stepping through DIALS macromolecular crystallography data processing,
-built around the workflow described in the CCP4/DLS & CCP4/APS 2024
-tutorials:
+A wxPython graphical front end for stepping through DIALS
+macromolecular crystallography data processing, built around the workflow
+described in the CCP4/DLS & CCP4/APS 2024 tutorials:
 https://github.com/graeme-winter/dials_tutorials/tree/main/ccp4-dls-2024
 
 It does not reimplement any DIALS algorithm — it only builds the correct
@@ -14,17 +13,56 @@ subprocess, streams the live output to screen, and then reads back the
 
 ## Requirements
 
-* Python 3.8+ with `tkinter` (standard on most systems; on minimal Linux
-  installs you may need `sudo apt install python3-tk` or equivalent).
+* Python 3.8+ with `wxPython` (`pip install wxPython`, or
+  `libtbx.pip install wxPython` inside a DIALS/cctbx environment). DIALS
+  already ships wxPython for its own viewers (`dials.image_viewer`,
+  `dials.reciprocal_lattice_viewer`), so it is usually already present in a
+  sourced DIALS environment.
 * A working DIALS installation, sourced/activated so that `dials.import`,
   `dials.find_spots`, etc. are on `$PATH`. The GUI shows a warning banner
   at startup if it can't find `dials.import`.
-* *(Optional)* `matplotlib`, for the live **Plots** tab (see below). If it
-  isn't installed, everything else still works and the Plots tab simply
-  shows a note explaining how to enable it (`pip install matplotlib`, or
-  `libtbx.pip install matplotlib` inside a DIALS environment).
+* *(Optional)* `matplotlib` (with its `WXAgg` backend), for the live
+  **Plots** tab (see below). If it isn't installed, everything else still
+  works and the Plots tab simply shows a note explaining how to enable it
+  (`pip install matplotlib`, or `libtbx.pip install matplotlib` inside a
+  DIALS environment).
+
+## Installation
+
+The GUI is packaged as `dials-gui` (import package `dialsgui`).
+
+**Inside a sourced DIALS / cctbx environment** (the usual case — wxPython and
+matplotlib are already provided there), install without letting pip try to
+rebuild wxPython:
+
+```
+libtbx.pip install --no-deps dials-gui        # from PyPI, once published
+# or, from a checkout:
+libtbx.pip install --no-deps .
+```
+
+**In a plain Python environment**, a normal install pulls wxPython, and the
+`[plots]` extra adds matplotlib for the live Plots tab:
+
+```
+pip install "dials-gui[plots]"                 # from PyPI, once published
+# or, from a checkout:
+pip install ".[plots]"
+```
+
+Installing creates two equivalent console commands, `dials-gui` and
+`dials.gui` (the latter matching the `dials.*` command family).
 
 ## Running
+
+Once installed:
+
+```
+dials-gui          # or: dials.gui
+```
+
+Or straight from a source checkout without installing (`dials_gui.py` is a
+thin launcher for the `dialsgui/` package next to it):
 
 ```
 python3 dials_gui.py

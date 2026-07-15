@@ -1,11 +1,11 @@
 # CLAUDE.md — DIALS Workflow GUI
 
 Context file for picking this project back up. Read this before touching
-`dials_gui.py` again.
+the code again.
 
 ## What this project is
 
-A single-file Tkinter GUI (`dials_gui.py`) that wraps the DIALS
+A wxPython GUI (the `dialsgui/` package, launched via `dials_gui.py`) that wraps the DIALS
 macromolecular crystallography command-line suite (`dials.import`,
 `dials.find_spots`, `dials.index`, `dials.refine`, `dials.integrate`,
 `dials.symmetry`, `dials.scale`, `dials.merge`/`dials.export`, plus the
@@ -22,8 +22,116 @@ used at the time; only individual file pages and search snippets were
 reachable).
 
 Files:
-- `dials_gui.py` — the whole application.
+- `dials_gui.py` — thin launcher (`from dialsgui.app import main`); keeps
+  `python3 dials_gui.py` working. Also holds the user-facing module docstring.
+- `dialsgui/` — the application package (see "Package layout" below).
+- `make_app.sh` — bundles the launcher **and** the `dialsgui/` package into a
+  macOS `.app`, extracting the icon from `dialsgui/icon.py`.
+- `pyproject.toml` — pip packaging (setuptools/PEP 621). Distribution name
+  `dials-gui`, import package `dialsgui`, console scripts `dials-gui` and
+  `dials.gui` → `dialsgui.app:main`. `wxPython` is a hard dependency;
+  `matplotlib` is the optional `[plots]` extra (soft dependency, Plots tab
+  only). Version lives here (currently `1.0.0`) and is also hard-coded in
+  `make_app.sh` (`VERSION`) — bump both together.
+- `LICENSE` — BSD-3-Clause.
 - `README.md` — user-facing usage doc, written alongside the code.
+
+## Package layout
+
+The code was originally one ~3600-line `dials_gui.py`. It has since been
+split (code moved **verbatim**, behaviour unchanged) into `dialsgui/`:
+
+- `dialsgui/icon.py` — `APP_ICON_PNG_BASE64` + `get_app_icon()`. Kept as its
+  own small module so `make_app.sh` can still regex the base64 constant out of
+  a single file; the constant's parenthesised-string-literal format is
+  load-bearing for that regex — don't reflow it.
+- `dialsgui/model.py` — the `ExtraField` / `InputSpec` / `StepDef` dataclasses.
+  No GUI import.
+- `dialsgui/steps.py` — `STEPS`, `TOOLS`, `STATUS_ICONS` (imports `model`).
+- `dialsgui/parsers.py` — every pure `summarise_log` / `parse_*` / `corrmat_*`
+  / `extract_*` function. **No wx / matplotlib import** — importing this module
+  must stay cheap and GUI-free so the parsers can be unit-tested standalone.
+- `dialsgui/runner.py` — `ProcessRunner` + the `_WidgetVar` / `_FalseVar`
+  value adapters.
+- `dialsgui/frame.py` — `DialsFrame` (the ~2000-line GUI class) and the
+  **soft** matplotlib import (`HAVE_MPL`, `Figure`, `FigureCanvas`,
+  `NavigationToolbar`). This is where the bulk of GUI work happens.
+- `dialsgui/app.py` — `main()` (creates the `wx.App`, shows the frame).
+- `dialsgui/__init__.py` — deliberately import-light (just a docstring); it
+  must **not** import wx, so `import dialsgui.parsers` works without a GUI.
+
+Dead parsers flagged in earlier notes were removed during the split:
+`parse_find_spots`, `parse_refine_steps` (superseded by
+`parse_all_refine_steps`), `parse_find_spots_histograms`,
+`parse_refine_by_experiment`, `parse_cluster_list`, plus the regexes used only
+by them (`_IMAGESET_RE`, `_SWEEP_COUNT_RE`, `_RMSD_BY_EXP_RE`, `_CLUSTER_*`).
+`_FIND_SPOTS_RE` and `_REFINE_HEADER_RE` were kept — they're still used by the
+surviving `parse_find_spots_by_imageset` / `parse_all_refine_steps`.
+
+## GUI toolkit: wxPython (ported from Tkinter)
+
+**This application is now wxPython.** It was originally written in Tkinter
+and later ported to wxPython; the port preserved all behaviour, tab layout,
+and the pipeline/parsing logic verbatim — only the widget layer changed.
+When reading older notes below that mention Tk-isms, mentally map them onto
+their wx equivalents:
+
+- `DialsGUI(tk.Tk)` → **`DialsFrame(wx.Frame)`** (the `main()` function now
+  creates a `wx.App`, instantiates `DialsFrame`, `Show()`s it, and calls
+  `app.MainLoop()`).
+- `tk.StringVar` / `tk.BooleanVar` + `trace_add("write", …)` → each editable
+  field is a real wx control (`wx.TextCtrl` / `wx.ComboBox` / `wx.CheckBox`)
+  wrapped in a tiny **`_WidgetVar`** adapter that exposes `.get()` / `.set()`
+  over the control's `GetValue`/`SetValue`. This is why all the ported
+  command-building / plot-source helpers still call `.get()` on entries in
+  `self.field_vars` / `self.input_vars` unchanged. "Traces" became ordinary
+  event bindings (`EVT_TEXT` / `EVT_COMBOBOX` / `EVT_CHECKBOX`) that call
+  `_update_command_preview` (and, for the corr-matrix `use_scaled` toggle and
+  the scale cluster selector, their dedicated callbacks).
+- `self.workdir` was a `StringVar`; it is now a plain `self.workdir_value`
+  string plus a `workdir` **property** returning a shim object with
+  `.get()`/`.set()`, again so the many `self.workdir.get()` call sites in the
+  ported helpers work untouched. The top-bar `wx.TextCtrl` keeps
+  `workdir_value` in sync via an `EVT_TEXT` handler and is updated by
+  `.set()`.
+- `ttk.Notebook` → `wx.Notebook`; each tab is a `wx.Panel`. `select_step()`
+  rebuilds the notebook in `self.main_panel` (clearing `self.main_sizer`
+  with `Clear(delete_windows=True)`), the wx analogue of destroying and
+  recreating the Tk `self.main` children.
+- Read-only text areas (`tk.Text` … `state="disabled"`) →
+  `wx.TextCtrl(style=TE_MULTILINE|TE_READONLY|TE_DONTWRAP|HSCROLL)`;
+  `_set_text` uses `ChangeValue`, `_append_text` uses `AppendText`.
+- `ttk.Progressbar` → **`wx.Gauge`** (fixed 0–100 range). The old
+  `progress_bar.config(maximum=…, value=…)` + `progress_var.set(label)`
+  pairs are replaced by a single **`_set_progress(fraction, label)`** helper
+  (fraction in 0..1 → gauge 0..100, plus the `self.progress_label` text).
+  `self.progress_var` no longer exists — it's `self.progress_label`.
+- The `after()`-driven poll loop (`_poll_runner` rescheduling itself via
+  `self.after(150, …)`) → a repeating **`wx.Timer`** (`self._timer`, ~10 Hz)
+  bound to **`_on_timer`**, started in `run_step` and stopped on `done` in
+  `_finish_step`. `ProcessRunner` is otherwise identical (background thread +
+  `queue.Queue`), and the per-poll body (drain queue, append output, throttle
+  plot redraws every 5th poll, finish on `("done", rc)`) is line-for-line the
+  same as the old `_poll_runner`.
+- `self.after(0, cb)` / `after(ms, cb)` (report worker, delayed report open)
+  → `wx.CallAfter` / `wx.CallLater`.
+- `messagebox.*` → `wx.MessageBox(msg, caption, style)`; `filedialog.
+  askdirectory` → `wx.DirDialog`; `filedialog.askopenfilenames` →
+  `wx.FileDialog(FD_OPEN|FD_MULTIPLE)`; `simpledialog.askstring` →
+  `wx.TextEntryDialog`; the `launch_tool` `tk.Toplevel` → a modal
+  `wx.Dialog` with OK/Cancel.
+- Plots-tab page selector / scale cluster / log cluster: the three
+  `ttk.Combobox` + `StringVar` pairs are now bare `wx.ComboBox`
+  (`CB_READONLY`) read directly via `GetValue()` in `_selected_cluster`,
+  `_current_plot_page`, `_scale_log_view_name`, etc.; `_update_plot_pages`
+  uses `GetStrings()`/`Set()`/`SetValue()`, and `_select_plot_page` replaces
+  the old `self.plot_page_var.set(...)`.
+
+The pure logic — `ExtraField`/`InputSpec`/`StepDef`, `STEPS`, `TOOLS`,
+`summarise_log`, and **every** `parse_*` / `corrmat_*` / `extract_*`
+function — is byte-for-byte the Tkinter version; it never imported Tk and
+still doesn't import wx. Only the classes from `_WidgetVar` / `ProcessRunner`
+/ `DialsFrame` downward are wx-specific.
 
 ## Status
 
@@ -53,16 +161,19 @@ Design of the current Plots tab:
   Plots tab (the old one appeared everywhere — that was part of the
   problem).
 - It updates **live** off the streamed stdout while the step runs
-  (throttled to roughly every 5th poll in `_poll_runner`), then does a
+  (throttled to roughly every 5th poll in `_on_timer`), then does a
   definitive redraw from the on-disk `dials.<program>.log` in
   `_finish_step`, and also populates immediately when you re-select an
   already-run step (from its log).
 - `matplotlib` is once again a dependency, but a **soft** one: it's
   imported in a `try/except` at module top into `HAVE_MPL`, the backend is
-  forced to `TkAgg`, and if the import fails the tab still appears but just
-  shows a "install matplotlib to enable this" note. Nothing else in the
-  GUI depends on it. (So the old "matplotlib is no longer a dependency"
-  note below is obsolete — see the updated risk list.)
+  forced to `WXAgg` (the wxPython embedding uses `FigureCanvasWxAgg` /
+  `NavigationToolbar2WxAgg` from `matplotlib.backends.backend_wxagg`,
+  imported under the local aliases `FigureCanvas` / `NavigationToolbar`),
+  and if the import fails the tab still appears but just shows a "install
+  matplotlib to enable this" note. Nothing else in the GUI depends on it.
+  (So the old "matplotlib is no longer a dependency" note below is obsolete
+  — see the updated risk list.)
 
 What each `plot_kind` shows (all parsing done by pure, Tk-free functions
 near the top of the file — `parse_find_spots`, `parse_refine_steps`,
@@ -76,7 +187,7 @@ partial/streaming input so live updates work):
   vs refinement step, from the "Refinement steps" table. Reads rows after
   the *last* "Refinement steps" header (there can be more than one
   macrocycle).
-- `integrate`: a live `ttk.Progressbar` for block processing +, at the
+- `integrate`: a live `wx.Gauge` for block processing +, at the
   end, a 2×2 grid of line graphs vs image number from the "Summary vs
   image number" table (I/sigma sum & prf, full/part counts, CC prf, RMSD
   XY). The progress bar accounts for the fact that the block loop runs
@@ -101,8 +212,8 @@ partial/streaming input so live updates work):
 (via the Agg backend) and against all the real sample outputs the user
 provided** — the parsers and every `_plot_*` method were unit-tested and
 sample figures rendered and eyeballed. What still hasn't been tested is
-the tab running *inside a live Tk event loop against a live DIALS run* —
-i.e. the `FigureCanvasTkAgg` embedding, the `after()`-driven live redraw
+the tab running *inside a live wx event loop against a live DIALS run* —
+i.e. the `FigureCanvasWxAgg` embedding, the `wx.Timer`-driven live redraw
 cadence during a real multi-minute `dials.integrate`, and that the
 streamed stdout actually contains these tables in the same form DIALS
 writes them to the `.log` (the samples were pasted by the user; confirm
@@ -251,7 +362,7 @@ panel correctly shows the three cows/pigs/people clusters); `_build_command`
 tested for the joint toggle, cosym, correlation_matrix, and cluster scaling
 (inputs overridden + distinct output.* names, verified no overwrite);
 module still imports with matplotlib absent. **Not tested against a live
-DIALS multi-crystal run or a live Tk loop** — same gap as the single-crystal
+DIALS multi-crystal run or a live wx loop** — same gap as the single-crystal
 plots. In particular confirm against real output: that multi `dials.refine`
 prints "RMSDs by experiment" in this exact pipe-table form; and that
 `dials.correlation_matrix.html`'s `var graphs_*` blob names/shapes match
@@ -287,7 +398,8 @@ verified against real DIALS behaviour.
 
 ## Architecture (for whoever edits this next)
 
-Everything lives in `dials_gui.py`. Rough map:
+The code lives in the `dialsgui/` package (see "Package layout" above for
+which module holds what). Rough map of the pieces:
 
 - `ExtraField` / `InputSpec` / `StepDef` (dataclasses) — declarative
   description of each pipeline stage: program name, input file fields,
@@ -307,17 +419,17 @@ Everything lives in `dials_gui.py`. Rough map:
   streaming-tolerant functions near the top of the file. Unit-tested
   against the user's real sample outputs (see testing section).
 - `ProcessRunner` — runs a command in a background thread, pushes
-  stdout lines onto a `queue.Queue` polled by the Tk main loop via
-  `after()`, so the GUI doesn't block while e.g. `dials.integrate` runs.
-  Confirmed working.
-- `DialsGUI(tk.Tk)` — the app. Key methods:
+  stdout lines onto a `queue.Queue` polled by the wx main loop via a
+  repeating `wx.Timer` (`_on_timer`), so the GUI doesn't block while e.g.
+  `dials.integrate` runs. Confirmed working.
+- `DialsFrame(wx.Frame)` — the app. Key methods:
   - `select_step()` — rebuilds the right-hand Notebook (Setup & Run /
     Live Output / Summary / Full Log, **plus a Plots tab on steps whose
     `plot_kind` is set**). Resets the per-step plot state each time and,
     for plot-capable steps, populates the plots from the existing log.
   - `_build_setup_tab()` / `_build_import_inputs()` — renders the
     editable input/parameter fields, plus the Run/Stop/"Run and show
-    report" buttons and a status label (`report_status_var`) for the
+    report" buttons and a status label (`report_status_label`) for the
     report button. `_add_glob_pattern` adds the pattern **verbatim** to
     `self.image_files` (NOT expanded) — `dials.import` does its own
     expansion, and expanding here would put thousands of paths on the
@@ -327,16 +439,18 @@ Everything lives in `dials_gui.py`. Rough map:
     verbatim pattern, both passed straight through by `_build_command`).
   - `_build_command()` — assembles the actual argv list for the main
     pipeline command from field values. Confirmed working.
-  - `run_step()` / `_poll_runner()` / `_finish_step()` — the main
+  - `run_step()` / `_on_timer()` / `_finish_step()` — the main
     pipeline run/stream/status-update lifecycle. `run_step()` resets the
-    `live_output` buffer; `_poll_runner()` accumulates streamed stdout
-    into it and drives throttled live plot redraws; `_finish_step()` does
-    the definitive redraw from the on-disk log.
+    `live_output` buffer and starts the `wx.Timer`; `_on_timer()`
+    accumulates streamed stdout into it and drives throttled live plot
+    redraws (and stops the timer + calls `_finish_step` on `("done", rc)`);
+    `_finish_step()` does the definitive redraw from the on-disk log.
   - `_refresh_log_tab()` / `_current_log_text()` — read `dials.<program>.log`
     back after a run; `_current_log_text()` is the shared reader (also
     used to seed plots when re-selecting a step).
-  - `_build_plots_tab()` — **new**, builds the embedded `FigureCanvasTkAgg`
-    + toolbar (+ the integration progress bar) for a plot-capable step.
+  - `_build_plots_tab()` — **new**, builds the embedded `FigureCanvasWxAgg`
+    + toolbar (+ the integration `wx.Gauge` progress bar) for a plot-capable
+    step.
   - `_refresh_plots_from_text()` — **new**, dispatches on `plot_kind` to
     the right `_plot_*` method; guards against drawing onto a step the
     user has navigated away from.
@@ -348,7 +462,7 @@ Everything lives in `dials_gui.py`. Rough map:
     background thread (`subprocess.run`, not the streaming
     `ProcessRunner`, since this is a fire-and-forget-then-open-browser
     action rather than something the user watches live) and calls
-    `_report_finished()` back on the Tk main thread via `self.after(0, ...)`.
+    `_report_finished()` back on the wx main thread via `wx.CallAfter(...)`.
   - `_report_finished()` — re-enables the report button and
     either opens `dials.report.html` with `webbrowser.open()` or shows
     an error dialog with the captured stdout/stderr tail.
@@ -434,37 +548,56 @@ affects which on-screen button/label reflects the "done" state. Not
 worth fixing preemptively; only address if it actually confuses anyone
 in practice.
 
-## How to test changes without a full DIALS/Tk environment
+## How to test changes without a full DIALS/wx environment
 
-The sandbox this was built in has neither `tkinter` nor DIALS (but it
-*does* have `matplotlib`). Techniques used, worth reusing:
+The sandbox this was ported in has neither wxPython (it won't build there —
+no GTK dev libs) nor DIALS, but it *does* have `matplotlib`. Techniques
+used for the port, worth reusing:
 
-1. `python3 -m py_compile dials_gui.py` — catches syntax errors only.
-2. To unit-test pure-Python logic (`summarise_log`, and all six
-   `parse_*` live-plot functions) without a real Tk install, stub
-   `tkinter`/`tkinter.ttk`/`tkinter.filedialog`/`tkinter.messagebox`/
-   `tkinter.simpledialog` in `sys.modules` with dummy objects, then
-   **import the module normally** (`importlib.import_module`) rather than
-   `exec()`-ing its source — the dataclasses in the file need a real
-   module in `sys.modules` to resolve their annotations, and an `exec`
-   into a hand-built module object breaks that. Then call the parser
-   functions directly with the user's sample strings.
-3. To test that the GUI degrades gracefully when matplotlib is missing,
-   set `sys.modules["matplotlib"] = None` before importing, then assert
+1. `python3 -m py_compile dialsgui/*.py dials_gui.py` — catches syntax
+   errors only.
+2. To unit-test pure-Python logic (`summarise_log`, and all the `parse_*` /
+   `corrmat_*` / `extract_*` functions), **just `import dialsgui.parsers`** —
+   since the split, that module (and `dialsgui.model` / `dialsgui.steps`)
+   imports with no wx or matplotlib dependency, so no `sys.modules` stubbing
+   is needed anymore. Call the parser functions directly with the user's
+   sample strings. (Pre-split, this needed a stubbed `wx` in `sys.modules`;
+   that dance is now obsolete for parser tests — keep it only for the
+   frame-level tests below if wx is genuinely unavailable.)
+3. To test that the GUI degrades gracefully when matplotlib is missing, set
+   `sys.modules["matplotlib"] = None` before importing, then assert
    `HAVE_MPL is False`.
-4. To test the `_plot_*` drawing methods without Tk, force
-   `matplotlib.use("Agg")`, build a tiny fake object carrying just the
-   attributes those methods touch (`plot_figure`, `plot_status_var`,
-   `integrate_progress`, `integrate_progress_var`, and a bound
-   `_set_plot_status`), bind the unbound methods off `DialsGUI` to it,
-   and call them with sample text. Assert on the number of axes created
-   and on the status string, and `savefig` one figure to eyeball it.
+4. To smoke-test the **wx-specific** code (constructor, `_build_layout`,
+   `select_step`, `_build_command`) without a display, build a *functional*
+   `wx` stub whose widget classes are tiny objects recording
+   `GetValue`/`SetValue`/`SetLabel`/`Bind`/etc. (a `wx.BoxSizer` with a
+   no-op `Add`/`Clear`, a `wx.Notebook` with `AddPage`, a `wx.Timer`, dialog
+   classes returning `ID_CANCEL`). Then instantiate `DialsFrame()` and loop
+   over the steps calling `select_step(step)` and `_build_command(step)`,
+   asserting the argv is what you expect. This catches attribute typos and
+   wrong method signatures in the ported GUI layer.
+5. To test the `_plot_*` drawing methods with matplotlib present but no
+   display, force `matplotlib.use("Agg")` and stub only
+   `matplotlib.backends.backend_wxagg` (back `FigureCanvasWxAgg` with the
+   real `FigureCanvasAgg`, and a no-op `NavigationToolbar2WxAgg`) so
+   `HAVE_MPL` comes out True; then instantiate `DialsFrame` (with the wx
+   stub from technique 4), `select_step` each plot-capable step, call
+   `_refresh_plots_from_text(step, sample_text)`, and assert on
+   `len(frame.plot_figure.axes)` and `frame.plot_status_label.GetLabel()`.
+   NOTE: the plot state attributes were renamed in the port —
+   `plot_status_var`→`plot_status_label`, and the old
+   `integrate_progress`/`integrate_progress_var` are now
+   `progress_bar`(`wx.Gauge`)/`progress_label`, updated via the
+   `_set_progress(fraction, label)` helper — so a test that pokes those
+   directly must use the new names.
 
-All four techniques were used this round and the test scripts pass. What
-none of them prove is that the GUI actually *runs* with a live DIALS
-install and a real Tk display — in particular the `FigureCanvasTkAgg`
-embedding and the `after()`-driven live redraw during a real
-`dials.integrate`/`dials.scale` run. That remains the next real test.
+All five techniques were used for the port and pass (find_spots→1 axis,
+index→1, refine→2, integrate→4, scale→5, correlation_matrix→pending, with
+the same status strings the Tkinter version produced). What none of them
+prove is that the GUI actually *runs* with a live DIALS install and a real
+wx display — in particular the `FigureCanvasWxAgg` embedding and the
+`wx.Timer`-driven live redraw during a real `dials.integrate`/`dials.scale`
+run. That remains the next real test.
 
 ## Known unresolved risk areas (lower priority)
 
@@ -480,10 +613,11 @@ embedding and the `after()`-driven live redraw during a real
   quotes (e.g. a `unit_cell` value with spaces around commas).
 - `matplotlib` is a **soft** dependency again (only for the Plots tab):
   imported under `try/except` into `HAVE_MPL`, backend forced to
-  `TkAgg`. If you merge this with another branch/copy of the file, make
-  sure there's exactly one such import block and no leftover hard
-  `import matplotlib` at top level that would break startup where it's
-  absent.
+  `WXAgg` (with `FigureCanvasWxAgg` / `NavigationToolbar2WxAgg` from
+  `matplotlib.backends.backend_wxagg`). If you merge this with another
+  branch/copy of the file, make sure there's exactly one such import block
+  and no leftover hard `import matplotlib` at top level that would break
+  startup where it's absent.
 - Live plot parsing assumes DIALS' *stdout* contains the same tables, in
   the same text layout, as the `.log` file and as the samples the user
   pasted. Confirmed against the pasted samples only. If a future DIALS

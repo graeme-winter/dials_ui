@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dials-gui"
+version = "1.0.0"
+description = "A step-by-step wxPython front end for the DIALS crystallography suite"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "Graeme Winter", email = "gw363@cornell.edu" }]
+keywords = ["DIALS", "crystallography", "diffraction", "wxPython", "GUI", "MX"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Environment :: MacOS X",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+# wxPython is required to run the GUI. Inside a DIALS/cctbx environment it is
+# already provided (DIALS ships it for its own viewers), so pip will see the
+# requirement satisfied and skip it; use `pip install --no-deps .` there to be
+# certain it never tries to rebuild wxPython. matplotlib is only needed for the
+# live "Plots" tab and is therefore an optional extra (the app degrades to
+# "no Plots tab" without it).
+dependencies = ["wxPython"]
+
+[project.optional-dependencies]
+plots = ["matplotlib"]
+
+[project.scripts]
+dials-gui = "dialsgui.app:main"
+"dials.gui" = "dialsgui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/graeme-winter/dials_ui"
+Repository = "https://github.com/graeme-winter/dials_ui"
+Tutorials = "https://github.com/graeme-winter/dials_tutorials"
+
+[tool.setuptools]
+packages = ["dialsgui"]
