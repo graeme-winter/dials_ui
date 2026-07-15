@@ -7,8 +7,10 @@
 #   ./make_app.sh path/to/foo.py  # bundles a differently-named/located script
 #
 # Run this from (or point it at) the directory containing dials_gui.py.
+# The dialsgui/ package must sit next to it (dials_gui.py is a thin launcher
+# that imports it); both are copied into the bundle.
 # It must be run on macOS: it uses macOS's `sips`/`iconutil` to turn the
-# icon embedded in the script into a proper .icns, and produces a
+# icon embedded in dialsgui/icon.py into a proper .icns, and produces a
 # standard macOS .app bundle (Contents/MacOS, Contents/Resources, Info.plist).
 #
 # The resulting .app is a *thin* wrapper: it does not freeze Python or
@@ -71,14 +73,25 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cp "$SCRIPT_DIR/$SCRIPT_FILE" "$APP_DIR/Contents/Resources/$SCRIPT_FILE"
 
+# The launcher (dials_gui.py) is a thin shim that imports the dialsgui/
+# package sitting next to it, so the package must be bundled too.
+PKG_DIR="$SCRIPT_DIR/dialsgui"
+if [[ ! -d "$PKG_DIR" ]]; then
+    echo "error: expected the 'dialsgui' package directory next to $SCRIPT_FILE" >&2
+    echo "       (looked in $PKG_DIR)" >&2
+    exit 1
+fi
+cp -R "$PKG_DIR" "$APP_DIR/Contents/Resources/dialsgui"
+rm -rf "$APP_DIR/Contents/Resources/dialsgui/__pycache__"
+
 # ---------------------------------------------------------------------------
-# 2. Extract the icon embedded in the script (APP_ICON_PNG_BASE64) and
+# 2. Extract the icon embedded in dialsgui/icon.py (APP_ICON_PNG_BASE64) and
 #    build an .icns from it via sips + iconutil.
 # ---------------------------------------------------------------------------
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-python3 - "$SCRIPT_DIR/$SCRIPT_FILE" "$WORKDIR/icon_src.png" <<'PYEOF'
+python3 - "$PKG_DIR/icon.py" "$WORKDIR/icon_src.png" <<'PYEOF'
 import base64
 import re
 import sys

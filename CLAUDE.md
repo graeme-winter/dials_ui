@@ -1,11 +1,11 @@
 # CLAUDE.md — DIALS Workflow GUI
 
 Context file for picking this project back up. Read this before touching
-`dials_gui.py` again.
+the code again.
 
 ## What this project is
 
-A single-file wxPython GUI (`dials_gui.py`) that wraps the DIALS
+A wxPython GUI (the `dialsgui/` package, launched via `dials_gui.py`) that wraps the DIALS
 macromolecular crystallography command-line suite (`dials.import`,
 `dials.find_spots`, `dials.index`, `dials.refine`, `dials.integrate`,
 `dials.symmetry`, `dials.scale`, `dials.merge`/`dials.export`, plus the
@@ -22,8 +22,44 @@ used at the time; only individual file pages and search snippets were
 reachable).
 
 Files:
-- `dials_gui.py` — the whole application.
+- `dials_gui.py` — thin launcher (`from dialsgui.app import main`); keeps
+  `python3 dials_gui.py` working. Also holds the user-facing module docstring.
+- `dialsgui/` — the application package (see "Package layout" below).
+- `make_app.sh` — bundles the launcher **and** the `dialsgui/` package into a
+  macOS `.app`, extracting the icon from `dialsgui/icon.py`.
 - `README.md` — user-facing usage doc, written alongside the code.
+
+## Package layout
+
+The code was originally one ~3600-line `dials_gui.py`. It has since been
+split (code moved **verbatim**, behaviour unchanged) into `dialsgui/`:
+
+- `dialsgui/icon.py` — `APP_ICON_PNG_BASE64` + `get_app_icon()`. Kept as its
+  own small module so `make_app.sh` can still regex the base64 constant out of
+  a single file; the constant's parenthesised-string-literal format is
+  load-bearing for that regex — don't reflow it.
+- `dialsgui/model.py` — the `ExtraField` / `InputSpec` / `StepDef` dataclasses.
+  No GUI import.
+- `dialsgui/steps.py` — `STEPS`, `TOOLS`, `STATUS_ICONS` (imports `model`).
+- `dialsgui/parsers.py` — every pure `summarise_log` / `parse_*` / `corrmat_*`
+  / `extract_*` function. **No wx / matplotlib import** — importing this module
+  must stay cheap and GUI-free so the parsers can be unit-tested standalone.
+- `dialsgui/runner.py` — `ProcessRunner` + the `_WidgetVar` / `_FalseVar`
+  value adapters.
+- `dialsgui/frame.py` — `DialsFrame` (the ~2000-line GUI class) and the
+  **soft** matplotlib import (`HAVE_MPL`, `Figure`, `FigureCanvas`,
+  `NavigationToolbar`). This is where the bulk of GUI work happens.
+- `dialsgui/app.py` — `main()` (creates the `wx.App`, shows the frame).
+- `dialsgui/__init__.py` — deliberately import-light (just a docstring); it
+  must **not** import wx, so `import dialsgui.parsers` works without a GUI.
+
+Dead parsers flagged in earlier notes were removed during the split:
+`parse_find_spots`, `parse_refine_steps` (superseded by
+`parse_all_refine_steps`), `parse_find_spots_histograms`,
+`parse_refine_by_experiment`, `parse_cluster_list`, plus the regexes used only
+by them (`_IMAGESET_RE`, `_SWEEP_COUNT_RE`, `_RMSD_BY_EXP_RE`, `_CLUSTER_*`).
+`_FIND_SPOTS_RE` and `_REFINE_HEADER_RE` were kept — they're still used by the
+surviving `parse_find_spots_by_imageset` / `parse_all_refine_steps`.
 
 ## GUI toolkit: wxPython (ported from Tkinter)
 
@@ -355,7 +391,8 @@ verified against real DIALS behaviour.
 
 ## Architecture (for whoever edits this next)
 
-Everything lives in `dials_gui.py`. Rough map:
+The code lives in the `dialsgui/` package (see "Package layout" above for
+which module holds what). Rough map of the pieces:
 
 - `ExtraField` / `InputSpec` / `StepDef` (dataclasses) — declarative
   description of each pipeline stage: program name, input file fields,
@@ -510,18 +547,16 @@ The sandbox this was ported in has neither wxPython (it won't build there —
 no GTK dev libs) nor DIALS, but it *does* have `matplotlib`. Techniques
 used for the port, worth reusing:
 
-1. `python3 -m py_compile dials_gui.py` — catches syntax errors only.
+1. `python3 -m py_compile dialsgui/*.py dials_gui.py` — catches syntax
+   errors only.
 2. To unit-test pure-Python logic (`summarise_log`, and all the `parse_*` /
-   `corrmat_*` / `extract_*` functions) without a real wx install, stub a
-   `wx` module in `sys.modules` (a bare `types.ModuleType("wx")` with a
-   dummy `wx.Frame` class so `class DialsFrame(wx.Frame)` resolves, plus
-   attribute placeholders for the constants/widgets referenced at
-   class-definition time), then **import the module normally**
-   (`importlib`), NOT via `exec()` — the dataclasses need a real module in
-   `sys.modules` to resolve their annotations. Then call the parser
-   functions directly with the user's sample strings. (The pure functions
-   are unchanged from the Tkinter version, so these tests carried over
-   verbatim and still pass.)
+   `corrmat_*` / `extract_*` functions), **just `import dialsgui.parsers`** —
+   since the split, that module (and `dialsgui.model` / `dialsgui.steps`)
+   imports with no wx or matplotlib dependency, so no `sys.modules` stubbing
+   is needed anymore. Call the parser functions directly with the user's
+   sample strings. (Pre-split, this needed a stubbed `wx` in `sys.modules`;
+   that dance is now obsolete for parser tests — keep it only for the
+   frame-level tests below if wx is genuinely unavailable.)
 3. To test that the GUI degrades gracefully when matplotlib is missing, set
    `sys.modules["matplotlib"] = None` before importing, then assert
    `HAVE_MPL is False`.
