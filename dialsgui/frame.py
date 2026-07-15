@@ -855,6 +855,11 @@ class DialsFrame(wx.Frame):
             )
             return
 
+        # Switch to the Live Output tab (index 1) so the user sees the
+        # streamed output immediately when they hit Run.
+        if self.notebook is not None:
+            self.notebook.SetSelection(1)
+
         self._set_text(self.output_text, "")
         self._append_text(self.output_text, f"$ {' '.join(cmd)}\n\n")
         self._set_text(self.summary_text, "(running...)")
