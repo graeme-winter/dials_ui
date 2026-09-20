@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -805,3 +806,53 @@ def cosym_dendrogram(blob: dict) -> List[Dict[str, object]]:
             }
         )
     return out
+
+
+def derive_glob_pattern(path: str) -> str:
+    """Given the path to ONE representative frame file from a sequence,
+    derive a shell glob pattern for the whole sequence by wildcarding the
+    last (rightmost) run of digits - typically the frame/image number -
+    with an equal number of '?' characters (each '?' matches exactly one
+    character, so a zero-padded frame number stays the same width, e.g.
+    'insulin_00001.cbf' -> 'insulin_?????.cbf').
+
+    This lets a user pick a single file in a file-browser dialog instead of
+    typing the whole glob by hand, while still ending up with a compact
+    pattern string - not an expanded list of thousands of paths - which
+    matters when a sweep has too many frames to pass as individual
+    arguments on the command line.
+
+    Two things this deliberately gets right rather than naively wildcarding
+    the last digit run anywhere in the basename:
+    - A genuine file extension (.cbf, .h5, .nxs, .img, ...) is never
+      touched, even if it happens to contain a digit (e.g. '.h5') - so
+      'image_data_000123.h5' wildcards the frame number, not the '5', and a
+      plain 'master.h5' with no frame numbering at all is left unchanged.
+    - The older "numbered extension" naming convention from MAR/ADSC-era
+      software, where the frame number IS the extension (e.g. 'lyso_1.0001',
+      'lyso_1.0002', with no separate file-type suffix), is detected - an
+      all-digit "extension" is wildcarded itself rather than treated as an
+      extension to protect.
+
+    If there's no digit run to wildcard at all, the path is returned
+    unchanged (it's just a single file). Either way this is a best-effort
+    heuristic - e.g. a name with more than one numeric run, such as a sweep
+    index AND a frame index, only wildcards the last one - so the caller is
+    expected to let the user review/edit the derived pattern before using
+    it."""
+
+    directory, basename = os.path.split(path)
+    stem, ext = os.path.splitext(basename)
+
+    if ext and ext[1:].isdigit():
+        # Numbered-extension convention: the frame number IS the extension.
+        digits = ext[1:]
+        new_basename = f"{stem}.{'?' * len(digits)}"
+    else:
+        matches = list(re.finditer(r"\d+", stem))
+        if not matches:
+            return path
+        start, end = matches[-1].span()
+        new_basename = stem[:start] + "?" * (end - start) + stem[end:] + ext
+
+    return os.path.join(directory, new_basename) if directory else new_basename

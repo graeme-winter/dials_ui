@@ -87,11 +87,17 @@ Left-hand sidebar, top to bottom, mirrors the WORKFLOW.md steps:
 
 1. **Import** (`dials.import`) — browse for image/master files, or add a
    glob pattern (e.g. `../data/CIX*gz`, or `../data/ins10_?.nxs` for the
-   multi-sweep insulin example). Glob patterns are passed to `dials.import`
-   **verbatim**, not expanded by the GUI, so a pattern that matches
-   thousands of images stays a single argument on the command line (the
-   listbox shows a rough match count as a hint only). Optionally set
-   `image_range`.
+   multi-sweep insulin example) — either typed by hand ("Add glob
+   pattern...") or, more conveniently, derived from a single file you pick
+   in a file browser ("Browse for glob..."): it wildcards the frame number
+   in whichever file you select and shows the result in an editable dialog
+   before adding it, so you don't have to type out a long path yourself.
+   Either way, glob patterns are passed to `dials.import` **verbatim**, not
+   expanded by the GUI, so a pattern that matches thousands of images stays
+   a single argument on the command line (the listbox shows a rough match
+   count as a hint only) — this is what you want when a sweep has too many
+   frames to pass individually without hitting shell/OS argument-length
+   limits. Optionally set `image_range`.
 2. **Find Spots** (`dials.find_spots`).
 3. **Search Beam Position** (optional, `dials.search_beam_position`) —
    writes `optimised.expt`; you can then point the Index step's
@@ -286,6 +292,16 @@ Each of these opens a small dialog pre-filled with sensible default
 filenames (based on the currently selected step) that you can edit before
 launching; they run as independent, non-blocking processes so you can
 keep working in the main window while they're open.
+
+### Job-finished notifications
+
+Every pipeline step (Import through Merge/Export) shows a native OS
+notification when it finishes — "DIALS step finished" for a successful
+run, "DIALS step failed" with the exit code otherwise — so you don't have
+to keep an eye on the window during a long `dials.integrate` or
+`dials.scale` run. This uses `wx.adv.NotificationMessage` and degrades
+silently (no notification, no error) if it isn't available on your
+platform/build; nothing else in the GUI is affected either way.
 
 ## Notes / limitations
 

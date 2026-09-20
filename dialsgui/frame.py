@@ -14,6 +14,13 @@ from typing import Dict, List, Optional, Tuple
 
 import wx
 
+try:
+    import wx.adv
+
+    HAVE_WX_ADV = True
+except Exception:  # pragma: no cover - depends on wx build
+    HAVE_WX_ADV = False
+
 # matplotlib is an optional dependency: the live-plotting "Plots" tab is only
 # offered if it (and its wxAgg backend) import successfully. Everything else
 # works without it, so a missing matplotlib degrades to "no Plots tab".
@@ -42,6 +49,7 @@ from .parsers import (
     cosym_dendrogram,
     cosym_hist_series,
     cosym_scatter_series,
+    derive_glob_pattern,
     extract_corrmat_graphs,
     integrate_summary_by_dataset,
     parse_all_refine_steps,
@@ -704,6 +712,9 @@ class DialsFrame(wx.Frame):
         browse = wx.Button(parent, label="Browse files...")
         browse.Bind(wx.EVT_BUTTON, lambda _e: self._browse_images())
         btn_row.Add(browse, 0, wx.ALL, 2)
+        browse_glob = wx.Button(parent, label="Browse for glob...")
+        browse_glob.Bind(wx.EVT_BUTTON, lambda _e: self._browse_for_glob())
+        btn_row.Add(browse_glob, 0, wx.ALL, 2)
         addglob = wx.Button(parent, label="Add glob pattern...")
         addglob.Bind(wx.EVT_BUTTON, lambda _e: self._add_glob_pattern())
         btn_row.Add(addglob, 0, wx.ALL, 2)
@@ -740,6 +751,53 @@ class DialsFrame(wx.Frame):
             return
         pattern = dlg.GetValue().strip()
         dlg.Destroy()
+        self._append_glob_pattern(pattern)
+
+    def _browse_for_glob(self):
+        """Let the user pick ONE representative frame file instead of typing
+        a glob pattern by hand, then derive the pattern from it (wildcarding
+        the frame number) for review/editing before it's added. Typing a
+        long path by hand is error-prone and tedious; this is purely a
+        convenience for constructing the pattern string; it still adds a
+        pattern (not an expanded file list) to image_files, which matters
+        when a sweep has too many frames to pass individually on the
+        command line without hitting shell/OS argument-length limits."""
+
+        dlg = wx.FileDialog(
+            self,
+            "Select ONE representative image from the sweep - its frame "
+            "number will be wildcarded to build a pattern for the whole "
+            "sequence",
+            defaultDir=self.workdir.get(),
+            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
+        )
+        if dlg.ShowModal() != wx.ID_OK:
+            dlg.Destroy()
+            return
+        path = dlg.GetPath()
+        dlg.Destroy()
+
+        pattern = derive_glob_pattern(path)
+        edit_dlg = wx.TextEntryDialog(
+            self,
+            "Review/edit the glob pattern derived from the file you picked "
+            "(the last run of digits in the filename was wildcarded with "
+            "'?' characters, one per digit). Edit it if this guessed wrong "
+            "- e.g. if the sweep index also needs wildcarding, or there was "
+            "no frame number to find. The pattern is passed to dials.import "
+            "as-is (not expanded here), so it's fine for it to match "
+            "thousands of images:",
+            "Glob pattern from file",
+            value=pattern,
+        )
+        if edit_dlg.ShowModal() != wx.ID_OK:
+            edit_dlg.Destroy()
+            return
+        pattern = edit_dlg.GetValue().strip()
+        edit_dlg.Destroy()
+        self._append_glob_pattern(pattern)
+
+    def _append_glob_pattern(self, pattern: str):
         if not pattern:
             return
         # Pass the pattern through verbatim - dials.import does its own shell-
@@ -988,6 +1046,33 @@ class DialsFrame(wx.Frame):
             self._append_text(
                 self.output_text, f"\n[process exited with code {returncode}]\n"
             )
+        if ok:
+            self._notify(
+                "DIALS step finished", f"{step.title} completed successfully."
+            )
+        else:
+            self._notify(
+                "DIALS step failed",
+                f"{step.title} exited with code {returncode}.",
+                is_error=True,
+            )
+
+    def _notify(self, title: str, message: str, is_error: bool = False) -> None:
+        """Show a native OS notification (e.g. so the user finds out a
+        multi-minute dials.integrate/dials.scale run finished while they
+        were doing something else). Best-effort only: notifications may be
+        unavailable (headless CI, some Linux setups without a notification
+        daemon, older wx builds without wx.adv) and must never interrupt or
+        crash the actual pipeline run over it."""
+
+        if not HAVE_WX_ADV:
+            return
+        try:
+            flags = wx.ICON_ERROR if is_error else wx.ICON_INFORMATION
+            note = wx.adv.NotificationMessage(title, message, parent=self, flags=flags)
+            note.Show(timeout=wx.adv.NotificationMessage.Timeout_Auto)
+        except Exception:
+            pass
 
     # ------------------------------------------------------- clusters --
     def _available_clusters(self) -> List[int]:

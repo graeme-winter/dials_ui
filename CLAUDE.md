@@ -594,10 +594,86 @@ affects which on-screen button/label reflects the "done" state. Not
 worth fixing preemptively; only address if it actually confuses anyone
 in practice.
 
-## How to test changes without a full DIALS/wx environment
+## Later addition: job-finished notification + browse-for-glob
 
-The sandbox this was ported in has neither wxPython (it won't build there —
-no GTK dev libs) nor DIALS, but it *does* have `matplotlib`. Techniques
+Two smaller, unrelated features added on explicit request after testing:
+
+- **Native OS notification when a pipeline step finishes.** `frame.py`
+  now does `import wx.adv` guarded exactly like the `matplotlib` import
+  (`try/except` → `HAVE_WX_ADV`), so a wx build without it just silently
+  gets no notifications rather than crashing at import time. New
+  `_notify(title, message, is_error=False)` method wraps
+  `wx.adv.NotificationMessage(...).Show(...)` in its own try/except (some
+  platforms/setups genuinely have no notification daemon — e.g. headless
+  Linux — and this must never interrupt the actual pipeline run over a
+  cosmetic failure). Called from `_finish_step()` for every step: "DIALS
+  step finished" / "{step.title} completed successfully." on success,
+  "DIALS step failed" / "{step.title} exited with code {rc}." with
+  `is_error=True` on failure. Deliberately **not** wired into
+  `_report_finished()` (the `dials.report` button) — that already gives
+  its own visible status-label/browser-open/error-dialog feedback and
+  usually finishes fast, so a second notification there seemed like
+  noise; revisit only if asked.
+- **"Browse for glob..." button on the Import step**, next to the
+  existing "Add glob pattern...". Typing a full glob path by hand was
+  reported as annoying, but the glob itself is still the right tool when
+  a sweep has too many frames to pass as individual arguments (shell/OS
+  argument-length limits) — so this doesn't replace the verbatim-pattern
+  approach, it just makes constructing the pattern string easier. Flow:
+  `wx.FileDialog` (pick ONE representative frame) → new pure function
+  `derive_glob_pattern(path)` in `parsers.py` (no wx import, so it's
+  unit-testable the normal way) wildcards the frame number → the result
+  is shown in an editable `wx.TextEntryDialog` for the user to confirm or
+  fix before it's added → shared `_append_glob_pattern(pattern)` (factored
+  out of what was inline in `_add_glob_pattern`, now used by both the
+  typed-pattern and browse-for-pattern paths) does the "count matches as
+  a hint, append to `image_files` **verbatim**, refresh the listbox and
+  command preview" work, unchanged from before.
+
+  `derive_glob_pattern` wildcards the **last run of digits**, with two
+  deliberate refinements caught by testing before this shipped (see
+  below): it looks inside `os.path.splitext(basename)`'s **stem only**,
+  so a genuine extension is never touched even when it contains a digit
+  (`image_data_000123.h5` → wildcards `000123`, not the `5` in `.h5`; a
+  plain `master.h5` with no frame numbering at all comes back unchanged,
+  not mangled into `master.h?`) — and it separately detects the older
+  MAR/ADSC-era "numbered extension" convention, where the frame number
+  *is* the extension (`lyso_1.0001`, `lyso_1.0002`, no real file-type
+  suffix): if the extension is all-digits, that's what gets wildcarded
+  (→ `lyso_1.????`), not the sweep index digit sitting in the stem. Both
+  of these were real bugs in the first version of this function, found by
+  running it against a table of sample filenames rather than just the
+  tutorial's own naming pattern — worth doing the same check again if
+  this function is ever touched, since "wildcard the last digit run" has
+  more edge cases than it looks like.
+
+**Testing done:** `python3 -m py_compile` on the whole package;
+`derive_glob_pattern` unit-tested against 11 representative filenames
+(zero-padded frame numbers, single-digit sweep index à la the tutorial's
+`ins10_?.nxs`, a bare `master.h5`, a `.h5`/data-file pair, no-extension
+names, double-dot names, and the numbered-extension convention) — all
+correct after the extension-awareness fix. Also built an ad hoc
+*functional* wx stub (module-level `__getattr__` returning 0 for unknown
+ALLCAPS-style names and a generic no-op/self-returning widget class for
+unknown TitleCase names — a more permissive version of the technique
+already described below) to actually instantiate `DialsFrame()`, call
+`select_step()` across all 12 `STEPS`, call `_notify()` directly, run the
+`derive_glob_pattern` → `_append_glob_pattern` path, and call
+`_finish_step()` directly for both a success and a failure return code to
+confirm the notification call fires in each branch without exceptions.
+That stub was scratch work in the session, not saved as a file — rebuild
+it the same way (or reuse technique 4 below) if these code paths need
+retesting. **Not tested against a real wx display, a real notification
+daemon/Notification Center, or a real DIALS run** — same never-run-for-
+real gap as everything else in this file; in particular, confirm on an
+actual machine that a notification is genuinely useful/visible during a
+real multi-minute `dials.integrate`/`dials.scale`, and that the derived
+glob pattern matches what the user actually expects for their beamline's
+real file-naming convention (NE-CAT's DECTRIS Eiger2/Pilatus4 output
+naming wasn't specifically checked against this function — only generic
+example patterns were).
+
+
 used for the port, worth reusing:
 
 1. `python3 -m py_compile dialsgui/*.py dials_gui.py` — catches syntax
@@ -670,3 +746,18 @@ run. That remains the next real test.
   release changes a table's columns/spacing, the relevant `parse_*`
   function is where to look first — they're deliberately isolated and
   each has a matching sample in the test scripts.
+- `wx.adv` is a **soft** dependency too now (only for job-finished
+  notifications): imported under `try/except` into `HAVE_WX_ADV`, and
+  `_notify()` itself has its own inner try/except around the actual
+  `NotificationMessage`/`Show()` call. Not confirmed to actually produce
+  a visible native notification on any real OS/desktop environment yet —
+  only that the call doesn't raise in the stub test.
+- `derive_glob_pattern()`'s "wildcard the last run of digits, extension-
+  aware" heuristic is unit-tested against invented sample filenames
+  (including the tutorial's own `ins10_?.nxs`-style convention and the
+  older MAR/ADSC numbered-extension convention) but not against a real
+  directory listing from an actual NE-CAT beamline data collection
+  (DECTRIS Eiger2/Pilatus4 naming). If "Browse for glob..." produces an
+  obviously wrong pattern for real data, that's the function to look at —
+  the review/edit dialog it shows before adding the pattern is the safety
+  net in the meantime.
